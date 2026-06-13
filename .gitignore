@@ -26,3 +26,6 @@ venv/
 
 # auto-generated reports
 autoresearch/reports/
+
+# session logs (not committed)
+SESSION_*.md
