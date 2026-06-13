@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Cache
+.syrch/cache/
+
+# SQLite databases (large binary files)
+*.sqlite
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# auto-generated reports
+autoresearch/reports/
