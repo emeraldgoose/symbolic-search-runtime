@@ -43,7 +43,7 @@ from syrch.search.clarify import find_worst_ambiguity, generate_question
 
 LLM_MODEL = "minimax-m3:cloud"
 LLM_FALLBACK_MODEL = "lfm2.5-thinking:latest"
-LLM_BASE_URL = "http://emeraldgoose.iptime.org:15031/v1"
+LLM_BASE_URL = "http://localhost:8000/v1"
 ORDERS_DB = "orders_10dim.sqlite"
 WIKI_DB = "wikipedia_clickstream.sqlite"
 AMBIGUITY_THRESHOLD = 0.25
