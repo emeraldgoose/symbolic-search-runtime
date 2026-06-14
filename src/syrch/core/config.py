@@ -10,6 +10,8 @@ class LLMConfig:
     api_key: str | None = None
     base_url: str | None = None
     temperature: float = 0.7
+    max_tokens_per_call: int = 4096
+    timeout_seconds: int = 120
 
 
 @dataclass

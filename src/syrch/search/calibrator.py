@@ -18,13 +18,13 @@ class ExecutionSignals:
 
 @dataclass
 class CalibrationWeights:
-    retry_ratio: float = 0.10
-    empty_result: float = 0.20
-    null_column: float = 0.10
+    retry_ratio: float = 0.05
+    empty_result: float = 0.15
+    null_column: float = 0.05
     overflow: float = 0.05
-    syntax_error: float = 0.15
-    schema_error: float = 0.10
-    execution_error: float = 0.20
+    syntax_error: float = 0.10
+    schema_error: float = 0.05
+    execution_error: float = 0.10
 
 
 def calibrate(

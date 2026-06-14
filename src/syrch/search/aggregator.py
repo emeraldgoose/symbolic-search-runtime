@@ -120,20 +120,24 @@ class Aggregator:
         if has_top_n:
             expected_rows = int(has_top_n.group(2))
 
+        global_by_year = "by year" in q_lower
+        applied_by_year = False
+
         for res in results.values():
             if res.data is not None and res.data.empty:
-                total_penalty += 0.25
+                total_penalty += 0.15
             if res.error is not None:
-                total_penalty += 0.20
+                total_penalty += 0.15
             if res.data is not None and not res.data.empty and expected_rows is not None:
                 if len(res.data) != expected_rows:
-                    total_penalty += 0.10
-            if res.data is not None and not res.data.empty and "by year" in q_lower:
+                    total_penalty += 0.05
+            if res.data is not None and not res.data.empty and global_by_year and not applied_by_year:
                 has_year = any("year" in c.lower() for c in res.data.columns)
                 if not has_year:
-                    total_penalty += 0.15
+                    total_penalty += 0.10
+                    applied_by_year = True
 
-        return min(total_penalty, 0.5)
+        return min(total_penalty, 0.4)
 
     def _try_join_merge(
         self,

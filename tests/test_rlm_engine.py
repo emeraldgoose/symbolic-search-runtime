@@ -61,7 +61,7 @@ def test_rlm_agent_stops_on_high_confidence():
     result = agent.solve(node)
 
     assert llm.call_count == 2
-    assert result.confidence == pytest.approx(0.9016, rel=1e-3)
+    assert result.confidence == pytest.approx(0.9108, rel=1e-3)
     assert result.sql == "SELECT * FROM test WHERE x > 100"
     assert len(result.reasoning_paths) == 2
 
@@ -92,7 +92,7 @@ def test_rlm_agent_uses_best_path_on_budget_exhausted():
     result = agent.solve(node)
 
     assert llm.count == 3
-    assert result.confidence == pytest.approx(0.28, rel=1e-2)
+    assert result.confidence == pytest.approx(0.29, rel=1e-2)
 
 
 class SyntaxErrorLLM:
@@ -126,7 +126,7 @@ def test_rlm_agent_validates_sql_syntax():
     result = agent.solve(node)
 
     assert llm.count == 2
-    assert result.confidence == pytest.approx(0.7395, rel=1e-3)
+    assert result.confidence == pytest.approx(0.7965, rel=1e-3)
     assert len(result.reasoning_paths) == 2
     # First path should have the invalid SQL recorded
     assert result.reasoning_paths[0].sql == "SELECT COUNT( FROM test"
@@ -163,7 +163,7 @@ def test_rlm_agent_validates_schema():
     result = agent.solve(node)
 
     assert llm.count == 2
-    assert result.confidence == pytest.approx(0.783, rel=1e-3)
+    assert result.confidence == pytest.approx(0.8407, rel=1e-3)
     assert len(result.reasoning_paths) == 2
     assert result.reasoning_paths[0].sql == "SELECT y FROM test"
 

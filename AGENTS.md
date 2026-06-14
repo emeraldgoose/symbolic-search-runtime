@@ -53,6 +53,20 @@ python validate_real.py --model "..."        # override LLM model
 python validate_real.py --verbose            # detailed output
 ```
 
+## Config
+
+Key `ExecutionConfig` / `LLMConfig` fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_attempts_per_node` | 3 | Max REPL retries per DAG node |
+| `high_confidence` | 0.85 | Threshold to early-stop REPL loop |
+| `token_budget` | 100_000 | Global token cap across all nodes |
+| `max_concurrency` | 5 | Max parallel threads in scheduler |
+| `calibration_enabled` | True | Apply execution-signal penalties |
+| `max_tokens_per_call` | 4096 | Max output tokens per LLM call (prevents runaway generation) |
+| `timeout_seconds` | 120 | Per-LLM-call HTTP timeout |
+
 ## Test
 
 ```bash
@@ -72,8 +86,47 @@ Aggregator (final):
   heuristic_penalty from: empty results, errors, TOP-N mismatch, missing columns
 ```
 
+### Confidence Details
+
+**Raw confidence extraction** (`rlm_engine.py:_extract_confidence`):
+- Scans LLM output for `Confidence: <0.0-1.0>` pattern
+- Returns `(value, found)` tuple — `found=False` when model omits the line
+- **Default** when not found: `0.7`
+
+**Execution-based boost** (`rlm_engine.py`):
+- When SQL executes successfully with non-empty data AND confidence was not explicitly stated by the LLM:
+  `confidence = 0.85` (overrides default 0.7)
+- Successful execution always wins as `best_path`, regardless of prior failed attempts
+
+**Calibration weights** (`calibrator.py`):
+
+| Signal | Weight | Effect |
+|--------|--------|--------|
+| `syntax_error` | 0.10 | ×0.90 per occurrence |
+| `execution_error` | 0.10 | ×0.90 per occurrence |
+| `empty_result` | 0.15 | ×0.85 if result is empty |
+| `schema_error` | 0.05 | ×0.95 per occurrence |
+| `null_column` | 0.05 | ×0.95 if result has all-NULL columns |
+| `retry_ratio` | 0.05 | Scales with attempts used |
+
+**Heuristic penalties** (`aggregator.py`):
+- Empty result: +0.15 per node
+- Error present: +0.15 per node  
+- TOP-N mismatch: +0.05 per node
+- "by year" without year column: +0.10 (once, global)
+- **Capped at 0.40 total**
+
 ## Cache
 
 - `diskcache`-backed `CentralCache` at `~/.syrch/cache` (TTL 24h)
 - Cache hit count displayed in validate_real.py output: `[cache:Nh]`
 - `--skip-cache` flag to bypass for fresh measurements
+
+## Small Model Tuning
+
+When using small quantized models (e.g., `qwen3.5-4b-4bit`):
+
+- Set `max_tokens_per_call=4096` (prevents 504 timeouts from runaway generation)
+- The confidence system auto-boosts to `0.85` when SQL executes successfully, compensating for models that don't output confidence scores
+- Calibration weights are tuned lower than default to avoid over-penalizing syntax/execution errors common in smaller models
+- Planner includes type guards (`isinstance` checks) for malformed JSON responses

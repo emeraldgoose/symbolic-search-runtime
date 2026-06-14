@@ -18,9 +18,13 @@ class OpenAILLM(BaseLLM):
         self.client = OpenAI(**kwargs)
 
     def generate(self, system: str, user: str, **kwargs) -> LLMResponse:
+        max_tokens = kwargs.get("max_tokens", 4096)
+        timeout = kwargs.get("timeout", 120)
         response = self.client.chat.completions.create(
             model=kwargs.get("model", self.model),
             temperature=kwargs.get("temperature", 0.7),
+            max_tokens=max_tokens,
+            timeout=timeout,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -37,11 +41,18 @@ class OpenAILLM(BaseLLM):
         )
 
     def generate_json(self, system: str, user: str, **kwargs) -> dict:
+        max_tokens = kwargs.get("max_tokens", 4096)
+        timeout = kwargs.get("timeout", 120)
         messages = [
             {"role": "system", "content": f"{system}\nRespond in JSON."},
             {"role": "user", "content": user},
         ]
-        kw = dict(model=kwargs.get("model", self.model), temperature=kwargs.get("temperature", 0.7))
+        kw = dict(
+            model=kwargs.get("model", self.model),
+            temperature=kwargs.get("temperature", 0.7),
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
         try:
             response = self.client.chat.completions.create(
                 **kw, response_format={"type": "json_object"}, messages=messages,

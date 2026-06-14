@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from syrch.core.config import ExecutionConfig
 from syrch.core.models import NodeResult, TaskDAG, TaskNode
@@ -22,6 +22,7 @@ class Scheduler:
         self.executor = executor
         self.config = config
         self.agent = agent or RLMAgent(llm, executor, config)
+        self.node_timeout = max(config.llm.timeout_seconds * config.max_attempts_per_node, 120)
 
     def run(self, dag: TaskDAG) -> dict[str, NodeResult]:
         results: dict[str, NodeResult] = {}
@@ -60,10 +61,18 @@ class Scheduler:
                     future = pool.submit(self.agent.solve, node, ctx)
                     future_map[future] = node
 
-                for future in as_completed(future_map):
+                for future in as_completed(future_map, timeout=self.node_timeout):
                     node = future_map[future]
                     try:
-                        result = future.result()
+                        result = future.result(timeout=self.node_timeout)
+                    except TimeoutError:
+                        result = NodeResult(
+                            node_id=node.id,
+                            data=None,
+                            sql="",
+                            confidence=0.0,
+                            error=f"Node timed out after {self.node_timeout}s",
+                        )
                     except Exception as e:
                         result = NodeResult(
                             node_id=node.id,

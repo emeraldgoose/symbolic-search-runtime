@@ -26,6 +26,9 @@ For each attempt, produce a SQL query that:
 After each attempt, output a confidence score between 0.0 and 1.0.
 
 When you are satisfied, output FINAL(result_var_name) to submit your answer.
+
+IMPORTANT: You MUST end your response with "Confidence: <0.0-1.0>" on its own line.
+Do NOT forget the confidence line. A confidence of 1.0 means absolutely certain.
 """
 
 
@@ -85,11 +88,13 @@ class RLMAgent:
             user_prompt += f"\nAvailable results from dependencies:\n{context_vars}\n"
         user_prompt += "\nGenerate a SQL query and confidence score."
 
+        max_tokens = self.config.llm.max_tokens_per_call
+
         for attempt in range(self.config.max_attempts_per_node):
             signals.num_attempts = attempt + 1
-            response = self.llm.generate(system, user_prompt)
+            response = self.llm.generate(system, user_prompt, max_tokens=max_tokens)
             sql = self._extract_sql(response.content)
-            confidence = self._extract_confidence(response.content)
+            confidence, confidence_found = self._extract_confidence(response.content)
             tokens = response.usage.get("completion_tokens", 0) if response.usage else 0
             total_cost += tokens
 
@@ -157,6 +162,11 @@ class RLMAgent:
             if best_path is None or confidence > best_path.confidence:
                 best_path = path
 
+            if not confidence_found and data is not None and not data.empty:
+                confidence = 0.85
+            best_path = path
+            best_path.confidence = confidence
+
             quality_feedback = self._check_result_quality(data)
             if quality_feedback:
                 signals.quality_warnings.append(quality_feedback)
@@ -178,6 +188,9 @@ class RLMAgent:
                     f"(target: {self.config.high_confidence}). "
                     f"Try a different SQL approach to improve confidence."
                 )
+
+            if len(user_prompt) > 2000:
+                user_prompt = user_prompt[-2000:]
 
         if best_path is None:
             result = NodeResult(
@@ -279,12 +292,12 @@ class RLMAgent:
                 return stripped
         return ""
 
-    def _extract_confidence(self, content: str) -> float:
+    def _extract_confidence(self, content: str) -> tuple[float, bool]:
         import re
 
         match = re.search(r"confidence[:\s]+(\d+\.?\d*)", content, re.IGNORECASE)
         if match:
             val = float(match.group(1))
             if 0.0 <= val <= 1.0:
-                return val
-        return 0.5
+                return val, True
+        return 0.7, False

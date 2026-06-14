@@ -63,13 +63,28 @@ class Planner:
         result = self.llm.generate_json(system, user)
         nodes: dict[str, TaskNode] = {}
         for item in result.get("subtasks", []):
+            if not isinstance(item, dict):
+                continue
+            node_id = item.get("id")
+            if not isinstance(node_id, str):
+                continue
+            depends_on_raw = item.get("depends_on", [])
+            depends_on: list[str] = [d for d in depends_on_raw if isinstance(d, str)]
+
             join_keys = None
-            if "join_keys" in item:
-                join_keys = [JoinKey(**k) for k in item["join_keys"]]
+            if isinstance(item.get("join_keys"), list):
+                join_keys = []
+                for k in item["join_keys"]:
+                    if isinstance(k, dict):
+                        try:
+                            join_keys.append(JoinKey(**k))
+                        except Exception:
+                            pass
+
             node = TaskNode(
-                id=item["id"],
-                description=item["description"],
-                depends_on=item.get("depends_on", []),
+                id=node_id,
+                description=item.get("description", ""),
+                depends_on=depends_on,
                 depth=depth,
                 is_atomic=item.get("is_atomic", True),
                 expected_output_desc=item.get("expected_output", ""),
