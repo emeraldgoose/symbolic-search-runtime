@@ -22,7 +22,8 @@ class Scheduler:
         self.executor = executor
         self.config = config
         self.agent = agent or RLMAgent(llm, executor, config)
-        self.node_timeout = max(config.llm.timeout_seconds * config.max_attempts_per_node, 120)
+        max_expected = config.llm.timeout_seconds * config.max_attempts_per_node
+        self.node_timeout = max(max_expected * 2, 300)
 
     def run(self, dag: TaskDAG) -> dict[str, NodeResult]:
         results: dict[str, NodeResult] = {}

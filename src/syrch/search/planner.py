@@ -57,12 +57,15 @@ class Planner:
         self._recursive_expand(dag, depth=0, schemas=problem.all_schemas or [problem.schema])
         return dag
 
+    MAX_SUBTASKS = 6
+    MAX_TOTAL_NODES = 12
+
     def _decompose_level(self, problem: ProblemSpec, depth: int = 0) -> TaskDAG:
         system = DECOMPOSE_SYSTEM.format(max_depth=self.config.max_depth)
         user = self._build_user_prompt(problem)
         result = self.llm.generate_json(system, user)
         nodes: dict[str, TaskNode] = {}
-        for item in result.get("subtasks", []):
+        for item in result.get("subtasks", [])[:self.MAX_SUBTASKS]:
             if not isinstance(item, dict):
                 continue
             node_id = item.get("id")
@@ -104,7 +107,7 @@ class Planner:
     def _recursive_expand(self, dag: TaskDAG, depth: int, schemas: list[TableSchema]) -> None:
         if not schemas:
             return
-        if depth >= self.config.max_depth - 1:
+        if depth >= self.config.max_depth - 1 or len(dag.nodes) >= self.MAX_TOTAL_NODES:
             for node in dag.nodes.values():
                 node.is_atomic = True
             return
@@ -119,6 +122,8 @@ class Planner:
             sub_dag = self._decompose_level(sub_problem, depth=depth + 1)
             self._recursive_expand(sub_dag, depth + 1, schemas)
             self._merge_sub_dag(dag, node, sub_dag)
+            if len(dag.nodes) >= self.MAX_TOTAL_NODES:
+                break
         dag.topo_layers = self._compute_layers(dag.nodes)
 
     def _merge_sub_dag(self, dag: TaskDAG, parent_node: TaskNode, sub_dag: TaskDAG) -> None:

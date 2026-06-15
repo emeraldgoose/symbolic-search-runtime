@@ -1,5 +1,7 @@
 # syrch — Symbolic Search Runtime
 
+**English** | [[한국어]](README_ko.md)
+
 NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solution
 
 ## Project Goal
@@ -388,6 +390,7 @@ python validate_real.py --model qwen3.5-4b --max-concurrency 1
 - **Graph Harness**: Structured DAG execution with immutable plan versions. [`paper`](https://arxiv.org/abs/2604.11378)
 - **AdaptOrch**: Topology-aware multi-agent orchestration (parallel/sequential/hierarchical/hybrid). [`paper`](https://arxiv.org/abs/2602.16873)
 - **DST**: Adaptive tree search with confidence-based pruning (26-75% computation reduction). [`paper`](https://arxiv.org/abs/2603.20267)
+- **LLM Compiler**: Parallel task scheduling via dependency graphs; closely related to syrch's DAG scheduler and layer-by-layer execution. [`paper`](https://arxiv.org/abs/2312.13311)
 
 ## Open Research Questions
 

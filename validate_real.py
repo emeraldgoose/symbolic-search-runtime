@@ -41,8 +41,8 @@ from syrch.search.clarify import find_worst_ambiguity, generate_question
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-LLM_MODEL = "minimax-m3:cloud"
-LLM_FALLBACK_MODEL = "lfm2.5-thinking:latest"
+LLM_MODEL = "qwen3.5-4b-4bit"
+LLM_FALLBACK_MODEL = "qwen3.5-4b-4bit"
 LLM_BASE_URL = "http://localhost:8000/v1"
 ORDERS_DB = "orders_10dim.sqlite"
 WIKI_DB = "wikipedia_clickstream.sqlite"
@@ -599,11 +599,13 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Detailed output")
     parser.add_argument("--max-depth", type=int, default=3, help="Max D&C recursion depth")
     parser.add_argument("--model", type=str, default=None, help="LLM model name (overrides default)")
+    parser.add_argument("--base-url", type=str, default=None, help="LLM base URL (overrides default)")
     args = parser.parse_args()
 
     model = args.model or LLM_MODEL
+    base_url = args.base_url or LLM_BASE_URL
     _cache = CentralCache(ttl=86400) if not args.skip_cache else None
-    llm = create_llm(skip_cache=args.skip_cache, model=model, cache=_cache)
+    llm = create_llm(skip_cache=args.skip_cache, model=model, base_url=base_url, cache=_cache)
     executor = create_executor(args.db, skip_cache=args.skip_cache, cache=_cache)
 
     overall_start = time.time()
@@ -625,6 +627,7 @@ def main() -> None:
             max_depth=args.max_depth,
             verbose=args.verbose,
             calibration_enabled=True,
+            llm=LLMConfig(model=model, base_url=base_url),
         )
         result = _run_case_with_check(case, config, llm, executor, cache_obj=_cache)
         print_case_result(result, 1, 1, verbose=args.verbose)

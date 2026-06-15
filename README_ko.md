@@ -1,0 +1,408 @@
+# syrch — Symbolic Search Runtime
+
+[English](README.md) | **한국어**
+
+NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solution
+
+## 프로젝트 목표
+
+`syrch`는 정형 데이터에 대한 자연어 문제의 최적 해결책을 탐색하는 **검색 도구**입니다. 단순 QA 에이전트처럼 한 번에 답하는 대신, **분할 정복(divide & conquer) 분해와 재귀 언어 모델(RLM)**을 사용해 여러 추론 경로를 탐색하고, 실제 데이터베이스에서 후보 해결책을 실행하여 가장 좋은 결과를 선택합니다.
+
+### 핵심 아이디어
+
+- **분할 정복**: 문제를 논리적으로 독립적인 하위 문제(sub-task)로 분해하고, 각각 독립적으로 해결한 뒤 결과를 병합합니다. 하위 문제 간 의존성은 DAG로 표현됩니다.
+- **RLM (Recursive Language Model)**: 각 하위 문제는 자체 REPL 루프에서 실행됩니다 — 코드 생성 → 구문 검증 → 스키마 검증 → SQL 실행 → 품질 검사 → 신뢰도 평가 → 개선 또는 중단. 노드당 여러 추론 경로를 탐색합니다.
+- **신뢰도 보정(Confidence Calibration)**: LLM이 스스로 평가한 신뢰도를 실행 신호(재시도, 오류, 빈 결과)로 할인하여 더 신뢰할 수 있는 점수를 산출합니다.
+- **격자 탐색(Grid Search)**: 하이퍼파라미터(`max_depth`, `high_confidence`, `max_attempts`, `calibration_enabled`)를 체계적으로 테스트하여 최적 설정을 찾습니다.
+- **다중 테이블 스키마**: Planner와 RLM이 모든 데이터베이스 테이블을 참조할 수 있습니다.
+- **실행이 아닌 추론에 대한 탐색**: D&C는 *문제 공간*을 분할하며, SQL을 분할하지 않습니다. 각 하위 문제는 완전한 추론 단위입니다 (생각 → 코드 → 검증 → 실행 → 평가).
+- **플러그형 Executor**: 추상 `BaseExecutor`에 SQLite, JDBC, Databricks 구현 — PEP 249 호환.
+
+## 아키텍처
+
+```
+User Question
+    │
+    ▼
+┌──────────────────┐
+│    Planner       │  ← LLM이 질문을 sub-task DAG로 분해
+│  (D&C)           │     (depends_on, is_atomic, expected_output)
+│                  │     다중 테이블 스키마: 모든 테이블 가시
+└──────┬───────────┘
+       │ TaskDAG (topo_layers)
+       ▼
+┌──────────────────┐
+│    Scheduler     │  ← 레이어별 DAG 실행
+│                   │
+│  각 노드:         │
+│  ┌─────────────┐  │
+│  │ RLM Agent    │  │  ← 3단계 검증 루프:
+│  │ 1. SQLGlot   │  │     1. 구문 검사 (sqlglot.parse_one)
+│  │    구문 검사  │  │     2. 스키마 AST 검사 (유효 컬럼)
+│  │ 2. Schema    │  │     3. 실행 + 품질 검사
+│  │    AST 검사   │  │     신뢰도 보정 적용
+│  │ 3. 실행       │  │
+│  │ 4. 품질 검사  │  │
+│  │ 5. 보정       │  │
+│  └─────────────┘  │
+│                   │
+│  가지치기:         │
+│  conf ≥ 임계값 → 즉시 중단
+│  최대 시도 도달 → 최고 경로 선택
+└──────┬───────────┘
+       │ NodeResults (DataFrames + SQL + confidence)
+       ▼
+┌──────────────────┐
+│   Aggregator     │  ← 리프 결과 병합 → 최종 답변
+│                   │     동점: 동일 confidence → 낮은 token_cost
+└──────┬───────────┘
+       │ FinalSolution
+       ▼
+ Optimal Answer + SQL + Reasoning Trace
+
+ ═══════ 선택사항: RLM Clarification ═══════
+       │
+       ▼ (if --interactive)
+┌──────────────────┐
+│  RLM Clarifier   │  ← RLM 소진 감지
+│                   │     ambiguity score >= 임계값
+│  노드 레벨:       │     → 사용자 질문
+│  ┌─────────────┐  │     → ProblemSpec 개선
+│  │ no_sql       │  │     → 파이프라인 재실행
+│  │ empty_result │  │
+│  │ quality_fail │  │
+│  │ low_confidence│  │
+│  └─────────────┘  │
+└──────┬───────────┘
+       │ Clarification answer → refined problem
+       ▼
+    Back to Planner
+
+ ═══════ 선택사항: Grid Search ═══════
+       │
+       ▼
+┌──────────────────┐
+│   Grid Search    │  ← 27-54 cells (파라미터 조합)
+│                   │     ProcessPoolExecutor (max_workers=3)
+│                   │     Reports: config.json, results.json,
+│                   │              best.json, summary.md
+└──────┬───────────┘
+       │ Best config → run_pipeline again
+```
+
+### 하위 태스크 실행 방식 (RLM 노드)
+
+```
+Node "Find top 10% customers"
+    │
+    ├── 시도 1: SQL 경로 A
+    │   ├── ✅ 구문 검사 (sqlglot)
+    │   ├── ✅ 스키마 컬럼 검사
+    │   ├── ✅ 실행 → 5,234 rows
+    │   ├── ⚠️ 품질: 5234 rows 반환 (>1000)
+    │   └── confidence: 0.72 (임계값 미달, 재시도)
+    │
+    ├── 시도 2: SQL 경로 B
+    │   ├── ✅ 구문 검사
+    │   ├── ✅ 스키마 컬럼 검사
+    │   ├── ✅ 실행 → 534 rows
+    │   ├── ✅ 품질: OK
+    │   └── confidence: 0.91 → 보정: 0.86 (임계값 초과, 중단)
+    │
+    └── 최고(보정된) 결과를 부모에 반환
+```
+
+## 디렉토리 구조
+
+```
+syrch/
+├── pyproject.toml
+├── README.md
+├── README_ko.md
+├── AGENTS.md
+├── PLAN.md
+├── autoresearch/
+│   └── reports/               # Grid search 출력 (JSON + Markdown)
+├── src/
+│   └── syrch/
+│       ├── cli/
+│       │   └── app.py                   # Typer CLI (search, schema, config, eval, benchmark)
+│       ├── core/
+│       │   ├── models.py                # 데이터 타입 (Pydantic-style dataclasses)
+│       │   └── config.py                # ExecutionConfig, LLMConfig
+│       ├── executors/
+│       │   ├── base.py                  # BaseExecutor (ABC)
+│       │   ├── sqlite_executor.py       # SQLite 구현 (thread-safe)
+│       │   ├── jdbc_executor.py         # JDBC via SQLAlchemy
+│       │   ├── databricks_executor.py   # Databricks SQL Connector
+│       │   └── cached_executor.py       # diskcache-backed SQL 결과 캐시
+│       ├── llm/
+│       │   ├── base.py                  # BaseLLM (ABC)
+│       │   ├── openai_llm.py            # OpenAI / structured JSON 출력
+│       │   ├── anthropic_llm.py         # Anthropic Claude
+│       │   └── cache.py                 # CachedLLM + CentralCache (diskcache, 24h TTL)
+│       ├── search/
+│       │   ├── planner.py               # D&C: NL → TaskDAG (다중 테이블, join keys, 재귀)
+│       │   ├── scheduler.py             # DAG 실행 엔진 + 가지치기 (max_concurrency)
+│       │   ├── rlm_engine.py            # 노드 레벨 RLM REPL 루프 + 3단계 검증
+│       │   ├── aggregator.py            # 결과 병합 → FinalSolution (cost tiebreaker, BFS join)
+│       │   ├── calibrator.py            # 실행 신호 기반 신뢰도 보정
+│       │   ├── clarify.py               # 모호성 점수 → 명확화 질문 생성
+│       │   ├── grid.py                  # Grid search 하이퍼파라미터 루프
+│       │   └── pipeline.py              # End-to-end: plan → schedule → aggregate
+│       └── eval/
+│           ├── runner.py                # Benchmark harness (run_single, run_benchmark)
+│           └── metrics.py               # Exact match, row count, column match
+├── orders_10dim.sqlite                  # TPC-H derived (750만 행, 10 차원)
+├── wikipedia_clickstream.sqlite         # Clickstream 데이터 (3K 행, 7 컬럼)
+├── validate_real.py                     # 실제 LLM + 실제 DB 검증 (5레벨 × 14 케이스)
+└── tests/
+    ├── test_cache.py                    # 캐시 단위 테스트
+    ├── test_clarify.py                  # Clarification 단위 테스트 (9 tests)
+    ├── test_e2e.py                      # 실제 SQLite DB에 대한 E2E 테스트
+    ├── test_eval.py                     # Evaluation harness 테스트
+    ├── test_integration.py              # 통합 테스트 (8 tests: DAG, grid, clarification, etc.)
+    ├── test_planner.py                  # Planner 단위 테스트
+    ├── test_rlm_engine.py               # RLM + validation + calibration 테스트
+    └── test_scheduler.py                # Scheduler 단위 테스트
+```
+
+## 데이터 모델
+
+```
+ProblemSpec { question, schema, all_schemas, goal_metric }
+    │
+    ▼
+TaskDAG { nodes: {A, B, C, ...}, root_id, topo_layers }
+    │  각 TaskNode: { id, description, depends_on, is_atomic, join_type }
+    ▼
+Scheduler → NodeResult { node_id, data(DataFrame), sql, confidence,
+                         reasoning_paths, cost_tokens, error }
+    │
+    ▼
+Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
+             (동점: 동일 confidence → 낮은 cost_tokens 우선)
+```
+
+## 사용법
+
+```bash
+# 설치
+pip install -e ".[dev]"
+
+# 데이터베이스 스키마 확인
+syrch schema wikipedia_clickstream.sqlite
+syrch schema orders_10dim.sqlite -t orders_10dim
+
+# 기본 설정 확인
+syrch config
+
+# 문제 해결 (LLM API 키 필요)
+export OPENAI_API_KEY="sk-..."
+syrch search -q "What discount × shipping combo maximizes revenue for top 10% customers?"
+
+# 옵션 사용
+syrch search -q "Which click type generates the most traffic?" \
+  --db wikipedia_clickstream.sqlite \
+  --max-depth 3 \
+  --high-conf 0.85 \
+  --max-attempts 3 \
+  --verbose
+
+# 하이퍼파라미터 격자 탐색 (54 cells)
+syrch search -q "..." --db orders_10dim.sqlite --grid
+
+# 예상 결과 대비 벤치마크
+syrch eval -q "..." --db orders_10dim.sqlite --expected expected.csv
+
+# 벤치마크 스위트 실행
+syrch benchmark benchmarks/orders.jsonl
+```
+
+### CLI 참조
+
+| Command | Option | 설명 |
+|---------|--------|------|
+| `search` | `-q` / `--question` | 자연어 문제 (필수) |
+| | `--db` | 데이터베이스 경로 (기본값: `orders_10dim.sqlite`) |
+| | `--max-depth` | 최대 D&C 재귀 깊이 (기본값: 3) |
+| | `--executor` | `sqlite` / `databricks` / `jdbc` |
+| | `--max-attempts` | 노드당 최대 RLM 시도 (기본값: 3) |
+| | `--high-conf` | 조기 중단을 위한 신뢰도 임계값 (기본값: 0.85) |
+| | `--budget` | 토큰 예산 (기본값: 100000) |
+| | `--llm` | `openai` / `anthropic` |
+| | `--model` | LLM 모델명 (기본값: `minimax-m3:cloud`) |
+| | `-v` / `--verbose` | 추론 과정 출력 |
+| | `--cache/--no-cache` | LLM + SQL 캐시 활성화/비활성화 (기본값: on) |
+| | `--cache-ttl` | 캐시 TTL (초) (기본값: 86400) |
+| | `--grid` | 하이퍼파라미터 격자 탐색 실행 |
+| | `--grid-parallel/--grid-sequential` | 병렬 vs 순차 격자 실행 |
+| | `--grid-max-workers` | 최대 동시 API 호출 (기본값: 3) |
+| | `--max-concurrency` | 최대 동시 LLM 호출 (기본값: 5; 로컬 모델은 1 권장) |
+| | `--interactive` | SQL로 해결 불가능시 명확화 질문 활성화 |
+| | `--non-interactive` | 명확화 없는 원샷 모드 (기본값) |
+| `eval` | `-q` | 질문 |
+| | `--db` | 데이터베이스 경로 |
+| | `--executor` | Executor 유형 |
+| | `--expected` | 예상 결과 CSV |
+| | `--report-format` | `md` / `json` |
+| `benchmark` | `PATH` | JSONL 벤치마크 파일 (positional) |
+| | `--executor` | Executor 유형 |
+| | `--report` | 출력 리포트 경로 |
+| `schema` | `DB` | 데이터베이스 경로 (positional) |
+| | `-t` / `--table` | 특정 테이블 |
+| `config` | `--db` | 데이터베이스 경로 |
+
+## 신뢰도 보정 (Confidence Calibration)
+
+LLM이 스스로 평가한 신뢰도를 실행 신호로 조정합니다:
+
+| 신호 | 패널티 가중치 | 트리거 |
+|------|-------------|--------|
+| 재시도 비율 | 0.10 | 재시도 많을수록 신뢰도 하락 |
+| 구문 오류 | 0.15 | SQLGlot 파싱 실패 |
+| 스키마 오류 | 0.10 | 알 수 없는 컬럼 참조 |
+| 실행 오류 | 0.20 | SQL 런타임 예외 |
+| 빈 결과 | 0.20 | 쿼리 반환 0행 |
+| 전체 NULL 컬럼 | 0.10 | 컬럼의 모든 값이 NULL |
+| 결과 오버플로우 | 0.05 | 1000행 초과 반환 |
+
+공식: `calibrated = raw × Π(1 - penalty_if_applicable)`
+
+`--no-cache` 전달시 비활성화 (`calibration_enabled=False` in `ExecutionConfig`).
+
+## 격자 탐색 (Grid Search)
+
+최적 설정을 위한 자동 하이퍼파라미터 탐색:
+
+```bash
+syrch search -q "What discount × shipping combo maximizes revenue?" \
+  --db orders_10dim.sqlite --grid
+```
+
+기본 파라미터 그리드 (54 cells):
+| Parameter | 값 |
+|-----------|-----|
+| max_depth | 1, 3, 5 |
+| high_confidence | 0.7, 0.85, 0.95 |
+| max_attempts_per_node | 1, 3, 5 |
+| calibration_enabled | True, False |
+
+출력: `autoresearch/reports/{YYYYMMDD-HHMMSS}/{config,results,best}.json` + `summary.md`
+
+최적 설정 선택: `exact_match > confidence` (오류 셀은 건너뜀).
+
+## 가지치기 전략 (Pruning)
+
+RLM 엔진은 신뢰도 기반 가지치기 전략을 사용합니다:
+
+1. 첫 번째 추론 경로 생성 → SQL → 3단계 검증 (구문 → 스키마 → 품질)
+2. 실행 → 점수 산출
+3. 신뢰도 보정 적용 (활성화된 경우)
+4. 보정된 신뢰도 ≥ `HIGH_CONFIDENCE` (0.85) → **즉시 수락**, 중단
+5. 임계값 미만 → 대체 경로 생성
+6. `max_attempts` 후 → 보정된 신뢰도 기준 **최고 경로** 선택
+
+이는 탐색의 철저함과 토큰 예산 사이의 균형을 유지합니다. 단순한 문제는 빠르게 해결(탐욕 경로)되고, 복잡한 문제는 여러 후보를 탐색합니다.
+
+## Executor 추상화
+
+모든 Executor는 `BaseExecutor`를 따릅니다:
+
+```python
+class BaseExecutor(ABC):
+    def execute(sql: str) -> DataFrame: ...
+    def get_schema(table_name?: str) -> TableSchema: ...
+    def list_tables() -> list[str]: ...
+    def close(): ...
+```
+
+| Executor | 백엔드 | 연결 방식 |
+|----------|--------|----------|
+| `SQLiteExecutor` | SQLite | `sqlite3` (thread-safe via `threading.local`) |
+| `JDBCExecutor` | Any JDBC | SQLAlchemy |
+| `DatabricksExecutor` | Databricks SQL | `databricks-sql-connector` (PEP 249) |
+
+## 캐싱
+
+모든 LLM 및 SQL 호출은 `diskcache`를 통해 캐시됩니다 (24h TTL):
+
+| 레이어 | 캐시 | 키 |
+|--------|------|-----|
+| LLM `generate()` | `CachedLLM` | SHA256(system + user + model + temperature) |
+| LLM `generate_json()` | `CachedLLM` | SHA256(system + user + model + temperature) |
+| SQL `execute()` | `CachedExecutor` | SHA256(sql) |
+
+`--cache/--no-cache` 플래그로 전환; TTL은 `--cache-ttl`로 설정 가능.
+
+## 데이터셋
+
+| Dataset | Rows | Size | 설명 |
+|---------|------|------|------|
+| `wikipedia_clickstream.sqlite` | 3,138 | 280 KB | 위키백과 클릭스트림 집계 데이터 |
+| `orders_10dim.sqlite` | 7,500,000 | 1.3 GB | TPC-H 기반 합성 주문 데이터 (10개 차원 컬럼) |
+
+## 테스트
+
+```bash
+# 단위 테스트 (FakeLLM, API 키 불필요)
+pytest tests/ -v
+
+# 전체 69개 테스트 통과:
+#   7  cache tests (CentralCache, CachedLLM, CachedExecutor)
+#   9  clarify tests (ambiguity score, question generation, worst detection)
+#   9  e2e tests (실제 SQLite DB + pipeline)
+#   14 eval tests (runner, metrics, benchmark, join merge)
+#   8  integration tests (DAG, grid, clarification loop, multi-table)
+#   8  planner tests (decompose, cycle, join keys, recursive)
+#   10 rlm_engine tests (validation, calibration, quality, calibrator)
+#   4  scheduler tests (DAG execution)
+```
+
+### 실제 환경 검증
+
+```bash
+# 전체 검증 실행 (LLM API 키 필요)
+python validate_real.py
+
+# 특정 레벨
+python validate_real.py --level 3 --verbose
+
+# 커스텀 질문
+python validate_real.py --question "Total revenue by year?" --db orders_10dim.sqlite
+
+# 로컬 모델 사용
+python validate_real.py --model qwen3.5-4b --max-concurrency 1
+
+# 결과 (2025-06-12):
+#   L1 Easy           3/3 PASS  conf=0.84-0.92
+#   L2 Medium         3/3 PASS  conf=0.76-0.99
+#   L3 Complex        1/2 PASS  4-node branching DAG
+#   L4 Very Complex   2/2 PASS  2-node + 3-node DAG
+#   L5 Ambiguous      ⏳       partial (API rate limited)
+```
+
+## 연구 배경
+
+- **RLM (Recursive Language Model)**: MIT CSAIL OASYS Lab, 2025. LLM이 REPL 환경을 통해 입력을 재귀적으로 분해하는 추론 패러다임. [`paper`](https://arxiv.org/abs/2512.24601) [`code`](https://github.com/alexzhang13/rlm)
+- **RDD (Recursive Decomposition with Dependencies)**: 의존성 DAG를 사용한 공식 D&C 프레임워크. [`paper`](https://arxiv.org/abs/2505.02576)
+- **PAC-MCTS**: 편향 인식 가지치기를 통한 트리 탐색 공식 보장. [`paper`](https://arxiv.org/abs/2604.14345)
+- **ROMA**: Atomizer/Planner/Executor/Aggregator 역할의 재귀 메타에이전트 프레임워크. [`paper`](https://arxiv.org/abs/2602.01848)
+- **Graph Harness**: 불변 계획 버전을 사용한 구조화된 DAG 실행. [`paper`](https://arxiv.org/abs/2604.11378)
+- **AdaptOrch**: 토폴로지 인식 멀티에이전트 오케스트레이션 (병렬/순차/계층/혼합). [`paper`](https://arxiv.org/abs/2602.16873)
+- **DST**: 신뢰도 기반 가지치기를 사용한 적응형 트리 탐색 (26-75% 계산량 감소). [`paper`](https://arxiv.org/abs/2603.20267)
+- **LLM Compiler**: 의존성 그래프를 통한 병렬 태스트 스케줄링; syrch의 DAG 스케줄러 및 레이어별 실행과 밀접한 관련. [`paper`](https://arxiv.org/abs/2312.13311)
+
+## 공개 연구 질문
+
+| 질문 | 접근 방식 |
+|------|----------|
+| **분할을 언제 멈출까?** (단위 케이스 감지) | LLM 자체 평가 + 복잡도 휴리스틱 실험 |
+| **하위 태스크 결과를 어떻게 병합할까?** | DAG 기반 REPL 변수 전달 + Aggregator 역할 |
+| **탐색 공간을 어떻게 가지치기할까?** | 신뢰도 기반 가지치기 + 불확실성 인식 할당 |
+| **최적 D&C 전략은?** | DAG 구조 메트릭 기반 토폴로지 라우팅 (AdaptOrch) |
+| **최적 보정 가중치는?** | 신호별 패널티 계수에 대한 격자 탐색 |
+| **조인 키 추론?** | Planner가 sub-task 간 join_keys 생성 |
+| **재귀 분해?** | Planner가 비원자 sub-task에 재귀 적용 |
+| **SQL로 해결 불가능할 때?** | RLM 명확화: 모호성 점수 → 대화형 피드백 → 재분해 |
+| **최적 명확화 임계값은?** | 점수 가중치 + 결정 경계에 대한 격자 탐색 |
