@@ -96,17 +96,17 @@ User Question
 Node "Find top 10% customers"
     │
     ├── 시도 1: SQL 경로 A
-    │   ├── ✅ 구문 검사 (sqlglot)
-    │   ├── ✅ 스키마 컬럼 검사
-    │   ├── ✅ 실행 → 5,234 rows
-    │   ├── ⚠️ 품질: 5234 rows 반환 (>1000)
+    │   ├── [PASS] 구문 검사 (sqlglot)
+    │   ├── [PASS] 스키마 컬럼 검사
+    │   ├── [PASS] 실행 → 5,234 rows
+    │   ├── [WARN] 품질: 5234 rows 반환 (>1000)
     │   └── confidence: 0.72 (임계값 미달, 재시도)
     │
     ├── 시도 2: SQL 경로 B
-    │   ├── ✅ 구문 검사
-    │   ├── ✅ 스키마 컬럼 검사
-    │   ├── ✅ 실행 → 534 rows
-    │   ├── ✅ 품질: OK
+    │   ├── [PASS] 구문 검사
+    │   ├── [PASS] 스키마 컬럼 검사
+    │   ├── [PASS] 실행 → 534 rows
+    │   ├── [PASS] 품질: OK
     │   └── confidence: 0.91 → 보정: 0.86 (임계값 초과, 중단)
     │
     └── 최고(보정된) 결과를 부모에 반환
@@ -121,50 +121,52 @@ syrch/
 ├── README_ko.md
 ├── AGENTS.md
 ├── PLAN.md
-├── autoresearch/
-│   └── reports/               # Grid search 출력 (JSON + Markdown)
-├── src/
-│   └── syrch/
-│       ├── cli/
-│       │   └── app.py                   # Typer CLI (search, schema, config, eval, benchmark)
-│       ├── core/
-│       │   ├── models.py                # 데이터 타입 (Pydantic-style dataclasses)
-│       │   └── config.py                # ExecutionConfig, LLMConfig
-│       ├── executors/
-│       │   ├── base.py                  # BaseExecutor (ABC)
-│       │   ├── sqlite_executor.py       # SQLite 구현 (thread-safe)
-│       │   ├── jdbc_executor.py         # JDBC via SQLAlchemy
-│       │   ├── databricks_executor.py   # Databricks SQL Connector
-│       │   └── cached_executor.py       # diskcache-backed SQL 결과 캐시
-│       ├── llm/
-│       │   ├── base.py                  # BaseLLM (ABC)
-│       │   ├── openai_llm.py            # OpenAI / structured JSON 출력
-│       │   ├── anthropic_llm.py         # Anthropic Claude
-│       │   └── cache.py                 # CachedLLM + CentralCache (diskcache, 24h TTL)
-│       ├── search/
-│       │   ├── planner.py               # D&C: NL → TaskDAG (다중 테이블, join keys, 재귀)
-│       │   ├── scheduler.py             # DAG 실행 엔진 + 가지치기 (max_concurrency)
-│       │   ├── rlm_engine.py            # 노드 레벨 RLM REPL 루프 + 3단계 검증
-│       │   ├── aggregator.py            # 결과 병합 → FinalSolution (cost tiebreaker, BFS join)
-│       │   ├── calibrator.py            # 실행 신호 기반 신뢰도 보정
-│       │   ├── clarify.py               # 모호성 점수 → 명확화 질문 생성
-│       │   ├── grid.py                  # Grid search 하이퍼파라미터 루프
-│       │   └── pipeline.py              # End-to-end: plan → schedule → aggregate
-│       └── eval/
-│           ├── runner.py                # Benchmark harness (run_single, run_benchmark)
-│           └── metrics.py               # Exact match, row count, column match
-├── orders_10dim.sqlite                  # TPC-H derived (750만 행, 10 차원)
-├── wikipedia_clickstream.sqlite         # Clickstream 데이터 (3K 행, 7 컬럼)
-├── validate_real.py                     # 실제 LLM + 실제 DB 검증 (5레벨 × 14 케이스)
+├── LICENSE
+├── .gitignore
+├── benchmarks/example.jsonl
+├── src/syrch/
+│   ├── __init__.py
+│   ├── cli/app.py                # Typer CLI
+│   ├── core/
+│   │   ├── models.py             # 데이터 타입 (dataclasses)
+│   │   ├── config.py             # ExecutionConfig + 설정 로더
+│   │   └── logging.py            # 구조화된 로깅
+│   ├── executors/
+│   │   ├── base.py               # BaseExecutor (ABC)
+│   │   ├── sqlite_executor.py    # SQLite
+│   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
+│   │   ├── databricks_executor.py # Databricks SQL
+│   │   └── cached_executor.py    # diskcache 기반 SQL 캐시
+│   ├── llm/
+│   │   ├── base.py               # BaseLLM (ABC)
+│   │   ├── openai_llm.py         # OpenAI
+│   │   ├── anthropic_llm.py      # Anthropic Claude
+│   │   └── cache.py              # CachedLLM + CentralCache
+│   ├── search/
+│   │   ├── planner.py            # D&C: NL -> TaskDAG
+│   │   ├── scheduler.py          # DAG 실행 엔진
+│   │   ├── rlm_engine.py         # RLM REPL 루프
+│   │   ├── aggregator.py         # 결과 병합
+│   │   ├── calibrator.py         # 신뢰도 보정
+│   │   ├── clarify.py            # 모호성 감지
+│   │   ├── grid.py               # Grid search
+│   │   └── pipeline.py           # 오케스트레이터
+│   └── eval/
+│       ├── runner.py             # 벤치마크 하네스
+│       ├── metrics.py            # 평가 메트릭
+│       └── report.py             # 리포트 내보내기
+├── validate_real.py              # 실제 LLM 검증
+├── orders_10dim.sqlite           # TPC-H 기반 (750만 행)
+├── wikipedia_clickstream.sqlite  # Clickstream (3K 행)
 └── tests/
-    ├── test_cache.py                    # 캐시 단위 테스트
-    ├── test_clarify.py                  # Clarification 단위 테스트 (9 tests)
-    ├── test_e2e.py                      # 실제 SQLite DB에 대한 E2E 테스트
-    ├── test_eval.py                     # Evaluation harness 테스트
-    ├── test_integration.py              # 통합 테스트 (8 tests: DAG, grid, clarification, etc.)
-    ├── test_planner.py                  # Planner 단위 테스트
-    ├── test_rlm_engine.py               # RLM + validation + calibration 테스트
-    └── test_scheduler.py                # Scheduler 단위 테스트
+    ├── test_cache.py
+    ├── test_clarify.py
+    ├── test_e2e.py
+    ├── test_eval.py
+    ├── test_integration.py
+    ├── test_planner.py
+    ├── test_rlm_engine.py
+    └── test_scheduler.py
 ```
 
 ## 데이터 모델
@@ -184,12 +186,46 @@ Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
              (동점: 동일 confidence → 낮은 cost_tokens 우선)
 ```
 
-## 사용법
+## 설치
 
 ```bash
-# 설치
+# 기본 (CLI + SQLite)
+pip install syrch
+
+# Databricks SQL Warehouse 연결
+pip install "syrch[databricks]"
+
+# PySpark executor (Databricks Runtime 내부)
+pip install "syrch[pyspark]"
+
+# 개발용 (테스트 + 린트)
 pip install -e ".[dev]"
 
+# 전체 설치
+pip install "syrch[all]"
+```
+
+## Python API (라이브러리 모드)
+
+Databricks notebook이나 Python 스크립트에서 직접 import하여 사용:
+
+```python
+from syrch import query
+
+result = query(
+    question="What discount × shipping combo maximizes revenue?",
+    executor_type="databricks",
+    model="gpt-4o",
+)
+print(result.answer)      # 최종 답변
+print(result.sql)         # 실행된 SQL
+print(result.confidence)  # 신뢰도
+print(result.data)        # 결과 DataFrame
+```
+
+## CLI 사용법
+
+```bash
 # 데이터베이스 스키마 확인
 syrch schema wikipedia_clickstream.sqlite
 syrch schema orders_10dim.sqlite -t orders_10dim
@@ -200,6 +236,9 @@ syrch config
 # 문제 해결 (LLM API 키 필요)
 export OPENAI_API_KEY="sk-..."
 syrch search -q "What discount × shipping combo maximizes revenue for top 10% customers?"
+
+# Config file 사용
+syrch search -q "..." --config syrch.yml
 
 # 옵션 사용
 syrch search -q "Which click type generates the most traffic?" \
@@ -231,7 +270,7 @@ syrch benchmark benchmarks/orders.jsonl
 | | `--high-conf` | 조기 중단을 위한 신뢰도 임계값 (기본값: 0.85) |
 | | `--budget` | 토큰 예산 (기본값: 100000) |
 | | `--llm` | `openai` / `anthropic` |
-| | `--model` | LLM 모델명 (기본값: `minimax-m3:cloud`) |
+| | `--model` | LLM 모델명 (기본값: `qwen3.5-4b-4bit`) |
 | | `-v` / `--verbose` | 추론 과정 출력 |
 | | `--cache/--no-cache` | LLM + SQL 캐시 활성화/비활성화 (기본값: on) |
 | | `--cache-ttl` | 캐시 TTL (초) (기본값: 86400) |
@@ -241,6 +280,7 @@ syrch benchmark benchmarks/orders.jsonl
 | | `--max-concurrency` | 최대 동시 LLM 호출 (기본값: 5; 로컬 모델은 1 권장) |
 | | `--interactive` | SQL로 해결 불가능시 명확화 질문 활성화 |
 | | `--non-interactive` | 명확화 없는 원샷 모드 (기본값) |
+| | `--config` | YAML 설정 파일 경로 (`syrch.yml` 또는 `~/.syrch/config.yml`) |
 | `eval` | `-q` | 질문 |
 | | `--db` | 데이터베이스 경로 |
 | | `--executor` | Executor 유형 |
@@ -253,21 +293,112 @@ syrch benchmark benchmarks/orders.jsonl
 | | `-t` / `--table` | 특정 테이블 |
 | `config` | `--db` | 데이터베이스 경로 |
 
+## 설정 (Configuration)
+
+설정은 다음 우선순위로 로드됩니다: **CLI 인자 > 환경변수 (`SYRCH_*`) > 설정 파일 > Databricks Secrets > 기본값**.
+
+### 설정 파일 (`syrch.yml`)
+
+```yaml
+llm:
+  provider: openai
+  model: qwen3.5-4b-4bit
+  base_url: http://100.88.35.18:11434/v1
+  temperature: 0.7
+  max_tokens_per_call: 4096
+  timeout_seconds: 120
+
+execution:
+  executor_type: sqlite
+  max_depth: 3
+  max_attempts_per_node: 3
+  high_confidence: 0.85
+  token_budget: 100000
+  cache_enabled: true
+  cache_ttl: 86400
+  verbose: false
+```
+
+검색 위치: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` 명시 지정
+
+### 환경변수
+
+| 변수 | 매핑 | 예시 |
+|------|------|------|
+| `SYRCH_MODEL` | `llm.model` | `gpt-4o` |
+| `SYRCH_API_KEY` | `llm.api_key` | `sk-...` |
+| `SYRCH_BASE_URL` | `llm.base_url` | `http://100.88.35.18:11434/v1` |
+| `SYRCH_MAX_DEPTH` | `execution.max_depth` | `3` |
+| `SYRCH_VERBOSE` | `execution.verbose` | `true` |
+
+### Databricks 연결
+
+| 변수 | 인증 방식 | 설명 |
+|------|-----------|------|
+| `DATABRICKS_SERVER_HOSTNAME` | 전체 | Databricks workspace URL |
+| `DATABRICKS_HTTP_PATH` | 전체 | SQL Warehouse HTTP path |
+| `DATABRICKS_TOKEN` | `pat` | Personal Access Token |
+| `DATABRICKS_AUTH_TYPE` | 전체 | `pat` (기본), `databricks-oauth`, `azure` |
+| `DATABRICKS_CLIENT_ID` | oauth/azure | OAuth 클라이언트 ID |
+| `DATABRICKS_CLIENT_SECRET` | oauth/azure | OAuth 클라이언트 시크릿 |
+| `AZURE_TENANT_ID` | azure | Azure AD 테넌트 ID |
+
+## 구조화된 로깅 (Structured Logging)
+
+내부 진단 메시지는 `logging`을 통해 **stderr**로 출력됩니다. 사용자 결과(Solution, SQL)는 `rich`를 통해 **stdout**으로 출력됩니다.
+
+```bash
+# 기본: WARNING+만 stderr 출력
+syrch search -q "..."
+
+# 상세 로그 (INFO 레벨)
+syrch search -q "..." -v
+
+# 라이브러리 모드
+python -c "
+from syrch import query
+result = query('Total revenue?', verbose=True)
+"
+```
+
+로그 포맷: `LEVEL:logger_name:message`
+
+```
+INFO:syrch.scheduler:Layer 0: dispatching 2 nodes
+WARNING:syrch.rlm_engine:Empty result, confidence penalized
+```
+
+## CI
+
+GitHub Actions (`push`/`PR` → `main`):
+
+| 단계 | 명령 |
+|------|------|
+| Lint | `ruff check src/syrch/` |
+| 타입 검사 | `mypy src/syrch/ --ignore-missing-imports` |
+| 테스트 | `pytest tests/ -v --cov=src/syrch/` (Python 3.11 + 3.12) |
+
 ## 신뢰도 보정 (Confidence Calibration)
 
 LLM이 스스로 평가한 신뢰도를 실행 신호로 조정합니다:
 
-| 신호 | 패널티 가중치 | 트리거 |
-|------|-------------|--------|
-| 재시도 비율 | 0.10 | 재시도 많을수록 신뢰도 하락 |
-| 구문 오류 | 0.15 | SQLGlot 파싱 실패 |
-| 스키마 오류 | 0.10 | 알 수 없는 컬럼 참조 |
-| 실행 오류 | 0.20 | SQL 런타임 예외 |
-| 빈 결과 | 0.20 | 쿼리 반환 0행 |
-| 전체 NULL 컬럼 | 0.10 | 컬럼의 모든 값이 NULL |
-| 결과 오버플로우 | 0.05 | 1000행 초과 반환 |
+| 신호 | 가중치 | 효과 |
+|------|--------|------|
+| `syntax_error` | 0.10 | ×0.90 per occurrence |
+| `execution_error` | 0.10 | ×0.90 per occurrence |
+| `empty_result` | 0.15 | ×0.85 if result is empty |
+| `schema_error` | 0.05 | ×0.95 per occurrence |
+| `null_column` | 0.05 | ×0.95 if result has all-NULL columns |
+| `retry_ratio` | 0.05 | Scales with attempts used |
 
-공식: `calibrated = raw × Π(1 - penalty_if_applicable)`
+**Heuristic penalties** (aggregator):
+- Empty result: +0.15 per node
+- Error present: +0.15 per node
+- TOP-N mismatch: +0.05 per node
+- "by year" without year column: +0.10 (once, global)
+- **Capped at 0.40 total**
+
+공식: `calibrated = raw × Π(1 - weight_if_applicable)`
 
 `--no-cache` 전달시 비활성화 (`calibration_enabled=False` in `ExecutionConfig`).
 
@@ -374,12 +505,14 @@ python validate_real.py --question "Total revenue by year?" --db orders_10dim.sq
 # 로컬 모델 사용
 python validate_real.py --model qwen3.5-4b --max-concurrency 1
 
-# 결과 (2025-06-12):
-#   L1 Easy           3/3 PASS  conf=0.84-0.92
-#   L2 Medium         3/3 PASS  conf=0.76-0.99
-#   L3 Complex        1/2 PASS  4-node branching DAG
-#   L4 Very Complex   2/2 PASS  2-node + 3-node DAG
-#   L5 Ambiguous      ⏳       partial (API rate limited)
+# 결과 (2026-06-15, minimax-m3:cloud):
+#   L1 Easy           3/3 PASS
+#   L2 Medium         3/3 PASS
+#   L3 Complex        2/2 PASS
+#   L4 Very Complex   2/2 PASS
+#   L5 Ambiguous      2/2 AMBIGUOUS (expected)
+#   ─────────────────────────────
+#   Total             10/10 PASS  100% (2 AMBIGUOUS)
 ```
 
 ## 연구 배경

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
@@ -8,6 +9,8 @@ from syrch.core.models import NodeResult, TaskDAG, TaskNode
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.rlm_engine import RLMAgent
+
+logger = logging.getLogger(__name__)
 
 
 class Scheduler:
@@ -47,13 +50,7 @@ class Scheduler:
                 continue
 
             if self.config.verbose:
-                from rich.console import Console
-
-                console = Console()
-                console.print(
-                    f"[dim]Layer {layer_idx}: dispatching "
-                    f"{[n.id for n in ready]}[/dim]"
-                )
+                logger.info("Layer %d: dispatching %s", layer_idx, [n.id for n in ready])
 
             with ThreadPoolExecutor(max_workers=min(len(ready), self.config.max_concurrency)) as pool:
                 future_map: dict = {}
@@ -86,28 +83,15 @@ class Scheduler:
                     total_tokens += result.cost_tokens
 
                     if self.config.verbose:
-                        from rich.console import Console
-
-                        console = Console()
-                        status = (
-                            f"[green]OK[/green]"
-                            if result.error is None
-                            else f"[red]FAIL[/red]"
-                        )
-                        console.print(
-                            f"  [{node.id}] {status} "
-                            f"confidence={result.confidence:.2f} "
-                            f"tokens={result.cost_tokens}"
-                        )
+                        status = "OK" if result.error is None else "FAIL"
+                        logger.info("  [%s] %s confidence=%.2f tokens=%d",
+                                    node.id, status, result.confidence, result.cost_tokens)
 
                     self._handle_alternative_joins(dag, node, results, consumed)
 
             if total_tokens > self.config.token_budget:
-                if self.config.verbose:
-                    from rich.console import Console
-
-                    console = Console()
-                    console.print("[yellow]Token budget exceeded, stopping[/yellow]")
+                logger.warning("Token budget exceeded (%d > %d), stopping",
+                               total_tokens, self.config.token_budget)
                 break
 
         return results

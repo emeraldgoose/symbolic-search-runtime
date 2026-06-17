@@ -76,7 +76,7 @@ User Question
 └──────┬───────────┘
        │ Clarification answer → refined problem
        ▼
-    Back to Planner (재시도)
+     Back to Planner (retry)
 
  ═══════ Optional: Grid Search ═══════
        │
@@ -96,17 +96,17 @@ User Question
 Node "Find top 10% customers"
     │
     ├── Attempt 1: SQL path A
-    │   ├── ✅ Syntax check (sqlglot)
-    │   ├── ✅ Schema column check
-    │   ├── ✅ Execute → 5,234 rows
-    │   ├── ⚠️ Quality: returned 5234 rows (>1000)
+    │   ├── [PASS] Syntax check (sqlglot)
+    │   ├── [PASS] Schema column check
+    │   ├── [PASS] Execute → 5,234 rows
+    │   ├── [WARN] Quality: returned 5234 rows (>1000)
     │   └── confidence: 0.72 (below threshold, retry)
     │
     ├── Attempt 2: SQL path B
-    │   ├── ✅ Syntax check
-    │   ├── ✅ Schema column check
-    │   ├── ✅ Execute → 534 rows
-    │   ├── ✅ Quality: OK
+    │   ├── [PASS] Syntax check
+    │   ├── [PASS] Schema column check
+    │   ├── [PASS] Execute → 534 rows
+    │   ├── [PASS] Quality: OK
     │   └── confidence: 0.91 → calibrated: 0.86 (above threshold, stop)
     │
     └── Return best (calibrated) result to parent
@@ -120,50 +120,52 @@ syrch/
 ├── README.md
 ├── AGENTS.md
 ├── PLAN.md
-├── autoresearch/
-│   └── reports/               # Grid search output (JSON + Markdown)
-├── src/
-│   └── syrch/
-│       ├── cli/
-│       │   └── app.py                   # Typer CLI (search, schema, config, eval, benchmark)
-│       ├── core/
-│       │   ├── models.py                # Data types (Pydantic-style dataclasses)
-│       │   └── config.py                # ExecutionConfig, LLMConfig
-│       ├── executors/
-│       │   ├── base.py                  # BaseExecutor (ABC)
-│       │   ├── sqlite_executor.py       # SQLite implementation (thread-safe)
-│       │   ├── jdbc_executor.py         # JDBC via SQLAlchemy
-│       │   ├── databricks_executor.py   # Databricks SQL Connector
-│       │   └── cached_executor.py       # diskcache-backed SQL result cache
-│       ├── llm/
-│       │   ├── base.py                  # BaseLLM (ABC)
-│       │   ├── openai_llm.py            # OpenAI / structured JSON output
-│       │   ├── anthropic_llm.py         # Anthropic Claude
-│       │   └── cache.py                 # CachedLLM + CentralCache (diskcache, 24h TTL)
-│       ├── search/
-│       │   ├── planner.py               # D&C: NL → TaskDAG (multi-table schema, join keys, recursive)
-│       │   ├── scheduler.py             # DAG execution engine + pruning (max_concurrency)
-│       │   ├── rlm_engine.py            # Node-level RLM REPL loop + 3-step validation
-│       │   ├── aggregator.py            # Result merge → FinalSolution (cost tiebreaker, BFS join)
-│       │   ├── calibrator.py            # Confidence calibration from execution signals
-│       │   ├── clarify.py               # Ambiguity score → clarification question generation
-│       │   ├── grid.py                  # Grid search hyperparameter loop
-│       │   └── pipeline.py              # End-to-end: plan → schedule → aggregate
-│       └── eval/
-│           ├── runner.py                # Benchmark harness (run_single, run_benchmark)
-│           └── metrics.py               # Exact match, row count, column match
-├── orders_10dim.sqlite                  # TPC-H derived (7.5M rows, 10 dims)
-├── wikipedia_clickstream.sqlite         # Clickstream data (3K rows, 7 columns)
-├── validate_real.py                     # Real LLM + real DB validation (5 levels × 14 cases)
+├── LICENSE
+├── .gitignore
+├── benchmarks/example.jsonl
+├── src/syrch/
+│   ├── __init__.py
+│   ├── cli/app.py                # Typer CLI
+│   ├── core/
+│   │   ├── models.py             # Data types (dataclasses)
+│   │   ├── config.py             # ExecutionConfig + config loader
+│   │   └── logging.py            # Structured logging
+│   ├── executors/
+│   │   ├── base.py               # BaseExecutor (ABC)
+│   │   ├── sqlite_executor.py    # SQLite
+│   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
+│   │   ├── databricks_executor.py # Databricks SQL
+│   │   └── cached_executor.py    # diskcache-backed SQL cache
+│   ├── llm/
+│   │   ├── base.py               # BaseLLM (ABC)
+│   │   ├── openai_llm.py         # OpenAI
+│   │   ├── anthropic_llm.py      # Anthropic Claude
+│   │   └── cache.py              # CachedLLM + CentralCache
+│   ├── search/
+│   │   ├── planner.py            # D&C: NL -> TaskDAG
+│   │   ├── scheduler.py          # DAG execution engine
+│   │   ├── rlm_engine.py         # RLM REPL loop
+│   │   ├── aggregator.py         # Result merge
+│   │   ├── calibrator.py         # Confidence calibration
+│   │   ├── clarify.py            # Ambiguity detection
+│   │   ├── grid.py               # Grid search
+│   │   └── pipeline.py           # Orchestrator
+│   └── eval/
+│       ├── runner.py             # Benchmark harness
+│       ├── metrics.py            # Evaluation metrics
+│       └── report.py             # Report export
+├── validate_real.py              # Real LLM validation
+├── orders_10dim.sqlite           # TPC-H derived (7.5M rows)
+├── wikipedia_clickstream.sqlite  # Clickstream data (3K rows)
 └── tests/
-    ├── test_cache.py                    # Cache unit tests
-    ├── test_clarify.py                  # Clarification unit tests (9 tests)
-    ├── test_e2e.py                      # End-to-end against real SQLite DBs
-    ├── test_eval.py                     # Evaluation harness tests
-    ├── test_integration.py              # Integration tests (8 tests: DAG, grid, clarification, etc.)
-    ├── test_planner.py                  # Planner unit tests
-    ├── test_rlm_engine.py               # RLM + validation + calibration tests
-    └── test_scheduler.py                # Scheduler unit tests
+    ├── test_cache.py
+    ├── test_clarify.py
+    ├── test_e2e.py
+    ├── test_eval.py
+    ├── test_integration.py
+    ├── test_planner.py
+    ├── test_rlm_engine.py
+    └── test_scheduler.py
 ```
 
 ## Data Model
@@ -183,11 +185,48 @@ Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
              (tiebreaker: equal confidence → lower cost_tokens wins)
 ```
 
-## Usage
+## Installation
+
+```bash
+# Core (CLI + SQLite)
+pip install syrch
+
+# Databricks SQL Warehouse
+pip install "syrch[databricks]"
+
+# PySpark executor (inside Databricks Runtime)
+pip install "syrch[pyspark]"
+
+# Development (tests + lint)
+pip install -e ".[dev]"
+
+# Everything
+pip install "syrch[all]"
+```
+
+## Python API (Library Mode)
+
+Use directly from Databricks notebooks or Python scripts:
+
+```python
+from syrch import query
+
+result = query(
+    question="What discount × shipping combo maximizes revenue?",
+    executor_type="databricks",
+    model="gpt-4o",
+)
+print(result.answer)
+print(result.sql)
+print(result.confidence)
+print(result.data)
+```
+
+## CLI Usage
 
 ```bash
 # Install
-pip install -e ".[dev]"
+pip install syrch
 
 # Inspect database schema
 syrch schema wikipedia_clickstream.sqlite
@@ -199,6 +238,9 @@ syrch config
 # Solve a problem (requires LLM API key)
 export OPENAI_API_KEY="sk-..."
 syrch search -q "What discount × shipping combo maximizes revenue for top 10% customers?"
+
+# With config file
+syrch search -q "..." --config syrch.yml
 
 # With options
 syrch search -q "Which click type generates the most traffic?" \
@@ -230,7 +272,7 @@ syrch benchmark benchmarks/orders.jsonl
 | | `--high-conf` | Confidence threshold for greedy stop (default: 0.85) |
 | | `--budget` | Token budget (default: 100000) |
 | | `--llm` | `openai` / `anthropic` |
-| | `--model` | LLM model name (default: `minimax-m3:cloud`) |
+| | `--model` | LLM model name (default: `qwen3.5-4b-4bit`) |
 | | `-v` / `--verbose` | Show reasoning traces |
 | | `--cache/--no-cache` | Enable/disable LLM + SQL cache (default: on) |
 | | `--cache-ttl` | Cache TTL in seconds (default: 86400) |
@@ -240,6 +282,7 @@ syrch benchmark benchmarks/orders.jsonl
 | | `--max-concurrency` | Max concurrent LLM calls (default: 5; use 1 for local models) |
 | | `--interactive` | Ask clarification questions when SQL cannot solve the task |
 | | `--non-interactive` | One-shot mode with no clarification (default) |
+| | `--config` | Path to YAML config file (`syrch.yml` or `~/.syrch/config.yml`) |
 | `eval` | `-q` | Question |
 | | `--db` | Database path |
 | | `--executor` | Executor type |
@@ -252,21 +295,112 @@ syrch benchmark benchmarks/orders.jsonl
 | | `-t` / `--table` | Specific table |
 | `config` | `--db` | Database path |
 
+## Configuration
+
+Config loaded from (priority order): **CLI args > env vars (`SYRCH_*`) > config file > Databricks Secrets > defaults**.
+
+### Config File (`syrch.yml`)
+
+```yaml
+llm:
+  provider: openai
+  model: qwen3.5-4b-4bit
+  base_url: http://100.88.35.18:11434/v1
+  temperature: 0.7
+  max_tokens_per_call: 4096
+  timeout_seconds: 120
+
+execution:
+  executor_type: sqlite
+  max_depth: 3
+  max_attempts_per_node: 3
+  high_confidence: 0.85
+  token_budget: 100000
+  cache_enabled: true
+  cache_ttl: 86400
+  verbose: false
+```
+
+Search paths: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` explicit override
+
+### Environment Variables
+
+| Variable | Maps to | Example |
+|----------|---------|---------|
+| `SYRCH_MODEL` | `llm.model` | `gpt-4o` |
+| `SYRCH_API_KEY` | `llm.api_key` | `sk-...` |
+| `SYRCH_BASE_URL` | `llm.base_url` | `http://100.88.35.18:11434/v1` |
+| `SYRCH_MAX_DEPTH` | `execution.max_depth` | `3` |
+| `SYRCH_VERBOSE` | `execution.verbose` | `true` |
+
+### Databricks Connection
+
+| Variable | Auth type | Description |
+|----------|-----------|-------------|
+| `DATABRICKS_SERVER_HOSTNAME` | all | Databricks workspace URL |
+| `DATABRICKS_HTTP_PATH` | all | SQL Warehouse HTTP path |
+| `DATABRICKS_TOKEN` | `pat` | Personal Access Token |
+| `DATABRICKS_AUTH_TYPE` | all | `pat` (default), `databricks-oauth`, or `azure` |
+| `DATABRICKS_CLIENT_ID` | oauth/azure | OAuth client ID |
+| `DATABRICKS_CLIENT_SECRET` | oauth/azure | OAuth client secret |
+| `AZURE_TENANT_ID` | azure | Azure AD tenant ID |
+
+## Structured Logging
+
+Internal diagnostics go to **stderr** via `logging`. User-facing output (Solution, SQL) goes to **stdout** via `rich`.
+
+```bash
+# Default: WARNING+ only to stderr
+syrch search -q "..."
+
+# Verbose: INFO level
+syrch search -q "..." -v
+
+# Library mode
+python -c "
+from syrch import query
+result = query('Total revenue?', verbose=True)
+"
+```
+
+Log format: `LEVEL:logger_name:message` (stdlib `logging` default)
+
+```
+INFO:syrch.scheduler:Layer 0: dispatching 2 nodes
+WARNING:syrch.rlm_engine:Empty result, confidence penalized
+```
+
+## CI
+
+GitHub Actions (`push`/`PR` → `main`):
+
+| Step | Command |
+|------|---------|
+| Lint | `ruff check src/syrch/` |
+| Type check | `mypy src/syrch/ --ignore-missing-imports` |
+| Test | `pytest tests/ -v --cov=src/syrch/` (Python 3.11 + 3.12) |
+
 ## Confidence Calibration
 
 LLM self-assessed confidence is adjusted by execution signals:
 
-| Signal | Penalty weight | Trigger |
-|--------|---------------|---------|
-| Retry ratio | 0.10 | More retries → lower confidence |
-| Syntax errors | 0.15 | SQLGlot parse failure |
-| Schema errors | 0.10 | Unknown column referenced |
-| Execution errors | 0.20 | SQL runtime exception |
-| Empty result | 0.20 | Query returned 0 rows |
-| All-NULL columns | 0.10 | All values in a column are NULL |
-| Result overflow | 0.05 | More than 1000 rows returned |
+| Signal | Weight | Effect |
+|--------|--------|--------|
+| `syntax_error` | 0.10 | ×0.90 per occurrence |
+| `execution_error` | 0.10 | ×0.90 per occurrence |
+| `empty_result` | 0.15 | ×0.85 if result is empty |
+| `schema_error` | 0.05 | ×0.95 per occurrence |
+| `null_column` | 0.05 | ×0.95 if result has all-NULL columns |
+| `retry_ratio` | 0.05 | Scales with attempts used |
 
-Formula: `calibrated = raw × Π(1 - penalty_if_applicable)`
+**Heuristic penalties** (aggregator):
+- Empty result: +0.15 per node
+- Error present: +0.15 per node
+- TOP-N mismatch: +0.05 per node
+- "by year" without year column: +0.10 (once, global)
+- **Capped at 0.40 total**
+
+Formula: `calibrated = raw × Π(1 - weight_if_applicable)`
 
 Disabled by passing `--no-cache` (sets `calibration_enabled=False` in `ExecutionConfig`).
 
@@ -373,12 +507,14 @@ python validate_real.py --question "Total revenue by year?" --db orders_10dim.sq
 # With local model
 python validate_real.py --model qwen3.5-4b --max-concurrency 1
 
-# Results (2025-06-12):
-#   L1 Easy           3/3 PASS  conf=0.84-0.92
-#   L2 Medium         3/3 PASS  conf=0.76-0.99
-#   L3 Complex        1/2 PASS  4-node branching DAG
-#   L4 Very Complex   2/2 PASS  2-node + 3-node DAG
-#   L5 Ambiguous      ⏳       partial (API rate limited)
+# Results (2026-06-15, minimax-m3:cloud):
+#   L1 Easy           3/3 PASS
+#   L2 Medium         3/3 PASS
+#   L3 Complex        2/2 PASS
+#   L4 Very Complex   2/2 PASS
+#   L5 Ambiguous      2/2 AMBIGUOUS (expected)
+#   ─────────────────────────────
+#   Total             10/10 PASS  100% (2 AMBIGUOUS)
 ```
 
 ## Research Background
@@ -403,5 +539,5 @@ python validate_real.py --model qwen3.5-4b --max-concurrency 1
 | **Optimal calibration weights?** | Grid search over penalty coefficients per signal |
 | **Join key inference?** | Planner emits join_keys between sub-tasks |
 | **Recursive decomposition?** | Planner recurses on non-atomic sub-tasks |
-| **When SQL cannot solve?** | RLM clarification: ambiguity score → interactive feedback → 재분해 |
+| **When SQL cannot solve?** | RLM clarification: ambiguity score → interactive feedback → re-decompose |
 | **Optimal clarification threshold?** | Grid search over score weights + decision boundary |

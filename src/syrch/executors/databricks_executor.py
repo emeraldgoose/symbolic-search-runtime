@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 
 import pandas as pd
 
 from syrch.core.models import ColumnSchema, TableSchema
 from syrch.executors.base import BaseExecutor
+
+logger = logging.getLogger(__name__)
 
 
 class DatabricksExecutor(BaseExecutor):
@@ -16,12 +19,20 @@ class DatabricksExecutor(BaseExecutor):
         access_token: str | None = None,
         catalog: str | None = None,
         schema: str | None = None,
+        auth_type: str = "pat",
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        azure_tenant_id: str | None = None,
     ):
         self.server_hostname = server_hostname or os.getenv("DATABRICKS_SERVER_HOSTNAME", "")
         self.http_path = http_path or os.getenv("DATABRICKS_HTTP_PATH", "")
         self.access_token = access_token or os.getenv("DATABRICKS_TOKEN", "")
         self.catalog = catalog or os.getenv("DATABRICKS_CATALOG")
         self.schema_name = schema or os.getenv("DATABRICKS_SCHEMA")
+        self.auth_type = auth_type or os.getenv("DATABRICKS_AUTH_TYPE", "pat")
+        self.client_id = client_id or os.getenv("DATABRICKS_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("DATABRICKS_CLIENT_SECRET")
+        self.azure_tenant_id = azure_tenant_id or os.getenv("AZURE_TENANT_ID")
         self._conn = None
 
     def _connect(self):
@@ -30,18 +41,36 @@ class DatabricksExecutor(BaseExecutor):
         kwargs = dict(
             server_hostname=self.server_hostname,
             http_path=self.http_path,
-            access_token=self.access_token,
         )
+
+        if self.auth_type == "pat":
+            kwargs["access_token"] = self.access_token
+        elif self.auth_type == "databricks-oauth":
+            kwargs["auth_type"] = "databricks-oauth"
+            kwargs["client_id"] = self.client_id
+            kwargs["client_secret"] = self.client_secret
+        elif self.auth_type == "azure":
+            kwargs["auth_type"] = "azure"
+            kwargs["client_id"] = self.client_id
+            kwargs["client_secret"] = self.client_secret
+            kwargs["azure_tenant_id"] = self.azure_tenant_id
+        else:
+            kwargs["access_token"] = self.access_token
+
         if self.catalog:
             kwargs["catalog"] = self.catalog
         if self.schema_name:
             kwargs["schema"] = self.schema_name
+
+        logger.debug("Connecting to Databricks: server=%s http_path=%s auth_type=%s",
+                     self.server_hostname, self.http_path, self.auth_type)
         self._conn = sql.connect(**kwargs)
         return self._conn
 
     def execute(self, sql: str) -> pd.DataFrame:
         if self._conn is None:
             self._connect()
+        logger.debug("Executing SQL on Databricks (%s chars)", len(sql))
         with self._conn.cursor() as cursor:
             cursor.execute(sql)
             rows = cursor.fetchall()
@@ -55,6 +84,7 @@ class DatabricksExecutor(BaseExecutor):
             table_name = self.list_tables()[0]
         if self._conn is None:
             self._connect()
+        logger.debug("Fetching schema for table: %s", table_name)
         with self._conn.cursor() as cursor:
             cursor.columns(catalog_name=self.catalog, schema_name=self.schema_name, table_name=table_name)
             columns = [
@@ -66,10 +96,12 @@ class DatabricksExecutor(BaseExecutor):
     def list_tables(self) -> list[str]:
         if self._conn is None:
             self._connect()
+        logger.debug("Listing tables in catalog=%s schema=%s", self.catalog, self.schema_name)
         with self._conn.cursor() as cursor:
             cursor.tables(catalog_name=self.catalog, schema_name=self.schema_name)
             return sorted({row[2] for row in cursor.fetchall()})
 
     def close(self) -> None:
         if self._conn:
+            logger.debug("Closing Databricks connection")
             self._conn.close()

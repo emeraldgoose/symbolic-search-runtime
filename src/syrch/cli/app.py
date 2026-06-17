@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import typer
@@ -7,7 +8,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
-from syrch.core.config import ExecutionConfig, LLMConfig
+from syrch.core.config import ExecutionConfig, LLMConfig, merge_config
+from syrch.core.logging import LogConfig, setup_logging
 from syrch.core.models import FinalSolution, ProblemSpec
 from syrch.eval.report import export_markdown, print_eval_result, print_benchmark_report, export_report
 from syrch.eval.runner import (
@@ -24,6 +26,8 @@ from syrch.llm.cache import CachedLLM, CentralCache
 from syrch.llm.openai_llm import OpenAILLM
 from syrch.llm.anthropic_llm import AnthropicLLM
 from syrch.search.pipeline import run_pipeline
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="syrch",
@@ -62,20 +66,24 @@ def _build_config(
     cache_enabled: bool = True,
     cache_ttl: int = 86400,
     interactive: bool = False,
+    config_file: str | None = None,
 ) -> ExecutionConfig:
-    return ExecutionConfig(
-        question=question,
-        db_path=db,
-        executor_type=executor,
-        max_depth=max_depth,
-        max_attempts_per_node=max_attempts,
-        high_confidence=high_confidence,
-        token_budget=budget,
-        verbose=verbose,
-        cache_enabled=cache_enabled,
-        cache_ttl=cache_ttl,
-        interactive=interactive,
-        llm=LLMConfig(provider=llm_provider, model=llm_model, api_key=api_key, base_url=base_url),
+    return merge_config(
+        cli_overrides=dict(
+            question=question,
+            db_path=db,
+            executor_type=executor,
+            max_depth=max_depth,
+            max_attempts_per_node=max_attempts,
+            high_confidence=high_confidence,
+            token_budget=budget,
+            verbose=verbose,
+            cache_enabled=cache_enabled,
+            cache_ttl=cache_ttl,
+            interactive=interactive,
+            llm=dict(provider=llm_provider, model=llm_model, api_key=api_key, base_url=base_url),
+        ),
+        config_file_path=config_file,
     )
 
 
@@ -102,6 +110,7 @@ def search(
     grid: bool = typer.Option(False, "--grid", help="Run grid search over hyperparameters"),
     grid_parallel: bool = typer.Option(True, "--grid-parallel/--grid-sequential", help="Run grid cells in parallel"),
     grid_max_workers: int = typer.Option(3, "--grid-max-workers", help="Max concurrent API calls during grid search"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to config file"),
 ) -> None:
     """Solve a problem using D&C + RLM search over SQL execution."""
     if grid:
@@ -116,17 +125,21 @@ def search(
         if report.best:
             console.print(f"[green]Best:[/green] {report.best.params}")
         console.print(f"[dim]Report:[/dim] {report.output_dir}")
-        console.print(f"  [dim]config.json[/dim]  — grid configuration")
-        console.print(f"  [dim]results.json[/dim] — all cell results")
-        console.print(f"  [dim]best.json[/dim]    — best config")
-        console.print(f"  [dim]summary.md[/dim]   — human-readable report")
+        console.print("  [dim]config.json[/dim]  — grid configuration")
+        console.print("  [dim]results.json[/dim] — all cell results")
+        console.print("  [dim]best.json[/dim]    — best config")
+        console.print("  [dim]summary.md[/dim]   — human-readable report")
         return
+
+    log_level = "INFO" if verbose else "WARNING"
+    setup_logging(LogConfig(level=log_level))
 
     config = _build_config(question, db, executor_type, max_depth, max_attempts,
                            high_confidence, budget, llm_provider, llm_model,
                            api_key, base_url, verbose,
                            cache_enabled=cache, cache_ttl=cache_ttl,
-                           interactive=interactive)
+                           interactive=interactive,
+                           config_file=config_file)
 
     console.print(f"[bold]syrch[/bold] \u2014 searching: [cyan]{question}[/cyan]")
     console.print(f"  db={db}  executor={executor_type}  max_depth={max_depth}")
@@ -201,12 +214,16 @@ def eval(
                                            help="OpenAI-compatible API base URL"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Enable LLM/SQL cache"),
     cache_ttl: int = typer.Option(86400, "--cache-ttl", help="Cache TTL in seconds"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to config file"),
 ) -> None:
     """Solve and evaluate a problem against expected results."""
+    setup_logging(LogConfig(level="WARNING"))
+
     config = _build_config(question, db, executor_type, max_depth, max_attempts,
                            high_confidence, budget, llm_provider, llm_model,
                            api_key, base_url, verbose=False,
-                           cache_enabled=cache, cache_ttl=cache_ttl)
+                           cache_enabled=cache, cache_ttl=cache_ttl,
+                           config_file=config_file)
 
     problem = BenchmarkProblem(id="eval", question=question, db=db, expected_data=expected)
     result = run_single(problem, llm_config=config.llm, config_overrides=dict(
@@ -236,8 +253,11 @@ def benchmark(
     base_url: Optional[str] = typer.Option("http://localhost:8000/v1", "--base-url"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="Enable LLM/SQL cache"),
     cache_ttl: int = typer.Option(86400, "--cache-ttl", help="Cache TTL in seconds"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="Path to config file"),
 ) -> None:
     """Run a benchmark suite from a JSONL file."""
+    setup_logging(LogConfig(level="WARNING"))
+
     console.print(f"[bold]Benchmark:[/bold] {file}")
 
     problems = load_benchmark(file)
