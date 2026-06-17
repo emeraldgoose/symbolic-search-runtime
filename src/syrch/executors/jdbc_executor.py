@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from syrch.core.models import TableSchema
+from syrch.core.models import ColumnSchema, TableSchema
 from syrch.executors.base import BaseExecutor
 
 
