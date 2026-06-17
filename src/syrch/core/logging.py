@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sys
 from dataclasses import dataclass
-from typing import cast
 
 
 @dataclass
@@ -29,7 +28,7 @@ def setup_logging(config: LogConfig | None = None) -> None:
     logger.handlers.clear()
 
     if config.format == "json":
-        formatter = _JsonFormatter()
+        formatter: logging.Formatter = _JsonFormatter()
     else:
         formatter = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
 
@@ -38,7 +37,7 @@ def setup_logging(config: LogConfig | None = None) -> None:
     else:
         handler = logging.StreamHandler(sys.stderr)
 
-    handler.setFormatter(cast(logging.Formatter, formatter))
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
 
     _initialized = True

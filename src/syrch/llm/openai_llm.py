@@ -38,7 +38,7 @@ class OpenAILLM(BaseLLM):
             kwargs["api_key"] = api_key
         if base_url:
             kwargs["base_url"] = base_url
-        self.client = OpenAI(**kwargs)
+        self.client = OpenAI(**kwargs)  # type: ignore[arg-type]
 
     def generate(self, system: str, user: str, **kwargs) -> LLMResponse:
         max_tokens = kwargs.get("max_tokens", 4096)

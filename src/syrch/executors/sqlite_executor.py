@@ -50,7 +50,7 @@ class SQLiteExecutor(BaseExecutor):
         with self._lock:
             if self._main_conn:
                 self._main_conn.close()
-                self._main_conn = None
+                self._main_conn = None  # type: ignore[assignment]
             if hasattr(self._local, "conn") and self._local.conn:
                 self._local.conn.close()
                 self._local.conn = None

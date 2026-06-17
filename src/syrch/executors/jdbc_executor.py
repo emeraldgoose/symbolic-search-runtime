@@ -22,11 +22,13 @@ class JDBCExecutor(BaseExecutor):
     def execute(self, sql: str) -> pd.DataFrame:
         if self._conn is None:
             self._connect()
+        assert self._conn is not None
         return pd.read_sql(sql, self._conn)
 
     def get_schema(self, table_name: str | None = None) -> TableSchema:
         if self._conn is None:
             self._connect()
+        assert self._conn is not None
         if table_name is None:
             table_name = self.list_tables()[0]
         result = self._conn.execute(f"SELECT * FROM {table_name} LIMIT 0")

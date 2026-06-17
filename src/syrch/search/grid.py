@@ -34,7 +34,7 @@ class GridSearchConfig:
             self.max_attempts_values,
             self.calibration_values,
         ]
-        return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+        return [dict(zip(keys, combo)) for combo in itertools.product(*values)]  # type: ignore[call-overload]
 
     @property
     def total_cells(self) -> int:
@@ -117,6 +117,8 @@ def _pick_best(cells: list[GridCellResult]) -> GridCellResult | None:
         if best is None:
             best = cell
             continue
+        assert best.result is not None and best.result.metrics is not None
+        assert cell.result is not None and cell.result.metrics is not None
         bm = best.result.metrics
         cm = cell.result.metrics
         if cm.exact_match and not bm.exact_match:

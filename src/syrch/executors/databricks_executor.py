@@ -70,6 +70,7 @@ class DatabricksExecutor(BaseExecutor):
     def execute(self, sql: str) -> pd.DataFrame:
         if self._conn is None:
             self._connect()
+        assert self._conn is not None
         logger.debug("Executing SQL on Databricks (%s chars)", len(sql))
         with self._conn.cursor() as cursor:
             cursor.execute(sql)
@@ -84,6 +85,7 @@ class DatabricksExecutor(BaseExecutor):
             table_name = self.list_tables()[0]
         if self._conn is None:
             self._connect()
+        assert self._conn is not None
         logger.debug("Fetching schema for table: %s", table_name)
         with self._conn.cursor() as cursor:
             cursor.columns(catalog_name=self.catalog, schema_name=self.schema_name, table_name=table_name)
@@ -96,6 +98,7 @@ class DatabricksExecutor(BaseExecutor):
     def list_tables(self) -> list[str]:
         if self._conn is None:
             self._connect()
+        assert self._conn is not None
         logger.debug("Listing tables in catalog=%s schema=%s", self.catalog, self.schema_name)
         with self._conn.cursor() as cursor:
             cursor.tables(catalog_name=self.catalog, schema_name=self.schema_name)

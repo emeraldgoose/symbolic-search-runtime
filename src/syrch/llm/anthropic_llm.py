@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 
+from typing import cast
+
 from anthropic import Anthropic
+from anthropic.types import TextBlock
 
 from syrch.llm.base import BaseLLM, LLMResponse
 
@@ -21,8 +24,9 @@ class AnthropicLLM(BaseLLM):
             temperature=kwargs.get("temperature", 0.7),
             messages=[{"role": "user", "content": user}],
         )
+        content = cast(TextBlock, response.content[0]).text
         return LLMResponse(
-            content=response.content[0].text,
+            content=content,
             model=response.model,
             usage={
                 "input_tokens": response.usage.input_tokens,
@@ -38,7 +42,7 @@ class AnthropicLLM(BaseLLM):
             temperature=kwargs.get("temperature", 0.7),
             messages=[{"role": "user", "content": user}],
         )
-        text = response.content[0].text
+        text = cast(TextBlock, response.content[0]).text
         import re
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:

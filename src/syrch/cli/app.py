@@ -160,29 +160,29 @@ def search(
 
     from syrch.search.clarify import find_worst_ambiguity, generate_question
 
-    problem = ProblemSpec(question=question, schema=schema)
+    spec = ProblemSpec(question=question, schema=schema)
     clarification_qa: list[tuple[str, str]] = []
 
     for _ in range(2):
         with console.status("[bold green]Planning decomposition...[/bold green]"):
-            solution, dag, _results = run_pipeline(llm, db_executor, config, problem)
+            solution, dag, _results = run_pipeline(llm, db_executor, config, spec)
 
         worst = find_worst_ambiguity(_results)
         if not (interactive and worst and worst[1] > config.ambiguity_threshold):
             break
 
         worst_id, worst_score = worst
-        q = generate_question(llm, problem, dag, worst_id, _results)
+        q = generate_question(llm, spec, dag, worst_id, _results)
         answer = console.input(f"\n[bold yellow]?[/bold yellow] {q}\n> ")
         clarification_qa.append((q, answer))
 
-        problem = ProblemSpec(
-            question=f"{problem.question}\n[User clarification: {answer}]",
+        spec = ProblemSpec(
+            question=f"{spec.question}\n[User clarification: {answer}]",
             schema=schema,
-            all_schemas=problem.all_schemas,
+            all_schemas=spec.all_schemas,
         )
 
-    solution.clarification_qa = clarification_qa
+    solution.clarification_qa = clarification_qa  # type: ignore[arg-type]
     solution.clarified = bool(clarification_qa)
 
     if verbose:

@@ -68,7 +68,7 @@ def _make_config(
     )
     if overrides:
         cfg.update(overrides)
-    config = ExecutionConfig(**cfg)
+    config = ExecutionConfig(**cfg)  # type: ignore[arg-type]
     if llm_config is not None:
         config.llm = llm_config
     return config
@@ -93,14 +93,14 @@ def run_single(
         if llm_cfg.provider == "openai":
             llm = OpenAILLM(model=llm_cfg.model, api_key=llm_cfg.api_key, base_url=llm_cfg.base_url)
         elif llm_cfg.provider == "anthropic":
-            llm = AnthropicLLM(model=llm_cfg.model, api_key=llm_cfg.api_key)
+            llm = AnthropicLLM(model=llm_cfg.model, api_key=llm_cfg.api_key)  # type: ignore[assignment]
         else:
             raise ValueError(f"Unknown LLM provider: {llm_cfg.provider}")
 
         cache: CentralCache | None = None
         if config.cache_enabled:
             cache = CentralCache(ttl=config.cache_ttl)
-            llm = CachedLLM(llm, cache, model=config.llm.model, temperature=config.llm.temperature)
+            llm = CachedLLM(llm, cache, model=config.llm.model, temperature=config.llm.temperature)  # type: ignore[assignment]
 
         executor = _create_executor(config.executor_type, config.db_path)
         if cache:
