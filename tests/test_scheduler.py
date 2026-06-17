@@ -1,8 +1,7 @@
 import pandas as pd
-import pytest
 
 from syrch.core.config import ExecutionConfig
-from syrch.core.models import NodeResult, TaskDAG, TaskNode
+from syrch.core.models import TaskDAG, TaskNode
 
 
 class FakeExecutor:

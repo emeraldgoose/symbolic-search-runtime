@@ -2,18 +2,14 @@
 
 import json
 import os
-import tempfile
 
 import pandas as pd
-import pytest
 
 from syrch.core.config import ExecutionConfig, LLMConfig
 from syrch.core.models import (
     ColumnSchema,
     FinalSolution,
-    NodeResult,
     ProblemSpec,
-    ReasoningPath,
     TableSchema,
     TaskDAG,
     TaskNode,

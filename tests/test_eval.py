@@ -8,7 +8,7 @@ import pytest
 
 from syrch.core.config import ExecutionConfig
 from syrch.core.models import ColumnSchema, FinalSolution, ProblemSpec, TableSchema
-from syrch.eval.metrics import EvaluationMetrics, evaluate
+from syrch.eval.metrics import evaluate
 from syrch.eval.runner import BenchmarkProblem, BenchmarkResult, load_benchmark
 from syrch.search.pipeline import run_pipeline
 
@@ -255,8 +255,6 @@ def test_benchmark_result_duration():
 def test_aggregator_try_join_merge():
     from syrch.search.aggregator import Aggregator
     from syrch.core.models import JoinKey, NodeResult
-    from syrch.executors.base import BaseExecutor
-    from syrch.llm.base import BaseLLM
 
     class FakeNullLLM:
         def generate(self, *a, **kw):
@@ -321,7 +319,7 @@ def test_aggregator_try_join_merge_3node_chain():
 
 def test_aggregator_try_join_merge_no_match_returns_none():
     from syrch.search.aggregator import Aggregator
-    from syrch.core.models import JoinKey, NodeResult
+    from syrch.core.models import NodeResult
 
     class FakeNullLLM:
         def generate(self, *a, **kw):

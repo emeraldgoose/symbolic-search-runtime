@@ -195,7 +195,6 @@ class RecursiveJoinKeyFakeLLM:
 
 def test_recursive_decomposition_with_join_keys():
     from syrch.search.planner import Planner
-    from syrch.core.models import JoinKey
 
     llm = RecursiveJoinKeyFakeLLM()
     config = ExecutionConfig(question="test", db_path=":memory:", max_depth=2)

@@ -1,14 +1,21 @@
 """End-to-end tests against real SQLite databases using FakeLLM."""
 
-import pandas as pd
+import os
 
-from syrch.core.config import ExecutionConfig, LLMConfig
-from syrch.core.models import ColumnSchema, ProblemSpec, TableSchema
+import pytest
+
+from syrch.core.config import ExecutionConfig
+from syrch.core.models import ProblemSpec
 from syrch.executors.sqlite_executor import SQLiteExecutor
 from syrch.search.aggregator import Aggregator
 from syrch.search.planner import Planner
 from syrch.search.scheduler import Scheduler
 from syrch.search.rlm_engine import RLMAgent
+
+
+def _require_db(path: str) -> None:
+    if not os.path.exists(path):
+        pytest.skip(f"Database file not found: {path}")
 
 
 class FakeLLM:
@@ -63,6 +70,7 @@ class FakeLLM:
 
 def test_wikipedia_clickstream_schema():
     """Wikipedia clickstream DB의 스키마 읽기 검증."""
+    _require_db("wikipedia_clickstream.sqlite")
     exec = SQLiteExecutor("wikipedia_clickstream.sqlite")
     tables = exec.list_tables()
     assert "wikipedia_clickstream" in tables
@@ -82,6 +90,7 @@ def test_wikipedia_clickstream_schema():
 
 def test_orders_10dim_schema():
     """Orders 10dim DB의 스키마 읽기 검증."""
+    _require_db("orders_10dim.sqlite")
     exec = SQLiteExecutor("orders_10dim.sqlite")
     tables = exec.list_tables()
     assert "orders_10dim" in tables
@@ -100,6 +109,7 @@ def test_orders_10dim_schema():
 
 def test_wikipedia_clickstream_query():
     """Wikipedia clickstream DB에 실제 SQL 실행 검증."""
+    _require_db("wikipedia_clickstream.sqlite")
     exec = SQLiteExecutor("wikipedia_clickstream.sqlite")
     df = exec.execute("SELECT type, SUM(total_n) as total FROM wikipedia_clickstream GROUP BY type ORDER BY total DESC")
     assert len(df) > 0
@@ -110,6 +120,7 @@ def test_wikipedia_clickstream_query():
 
 def test_orders_10dim_query():
     """Orders 10dim DB에 실제 SQL 실행 검증."""
+    _require_db("orders_10dim.sqlite")
     exec = SQLiteExecutor("orders_10dim.sqlite")
     df = exec.execute("SELECT o_orderpriority, COUNT(*) as cnt FROM orders_10dim GROUP BY o_orderpriority ORDER BY cnt DESC")
     assert len(df) > 0
@@ -120,6 +131,7 @@ def test_orders_10dim_query():
 
 def test_e2e_wikipedia_clickstream_pipeline():
     """Wikipedia clickstream으로 full search pipeline 검증."""
+    _require_db("wikipedia_clickstream.sqlite")
     config = ExecutionConfig(
         question="Which click type generates the most traffic?",
         db_path="wikipedia_clickstream.sqlite",
@@ -157,6 +169,7 @@ def test_e2e_wikipedia_clickstream_pipeline():
 
 def test_e2e_orders_10dim_pipeline():
     """Orders 10dim으로 full search pipeline 검증."""
+    _require_db("orders_10dim.sqlite")
     config = ExecutionConfig(
         question="What is the order priority distribution?",
         db_path="orders_10dim.sqlite",
@@ -193,6 +206,7 @@ def test_e2e_orders_10dim_pipeline():
 
 def test_e2e_multi_layer_dag():
     """Multi-layer DAG (의존성 있는 sub-task) 파이프라인 검증."""
+    _require_db("wikipedia_clickstream.sqlite")
     plan_response = {
         "subtasks": [
             {
@@ -252,6 +266,7 @@ def test_e2e_multi_layer_dag():
 
 def test_orders_10dim_row_count():
     """Orders 10dim의 행 수 검증 (cardinality check)."""
+    _require_db("orders_10dim.sqlite")
     exec = SQLiteExecutor("orders_10dim.sqlite")
     df = exec.execute("SELECT COUNT(*) as cnt FROM orders_10dim")
     assert df.iloc[0]["cnt"] == 7_500_000
@@ -260,6 +275,7 @@ def test_orders_10dim_row_count():
 
 def test_metadata_table_content():
     """Wikipedia clickstream metadata 테이블 내용 검증."""
+    _require_db("wikipedia_clickstream.sqlite")
     exec = SQLiteExecutor("wikipedia_clickstream.sqlite")
     df = exec.execute("SELECT key, value FROM metadata")
     assert len(df) > 0

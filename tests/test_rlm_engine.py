@@ -219,8 +219,6 @@ def test_rlm_agent_warns_empty_result():
 
 def test_validate_sql_direct():
     from syrch.search.rlm_engine import RLMAgent
-    from syrch.core.models import ColumnSchema, TableSchema
-    from syrch.executors.base import BaseExecutor
 
     class FakeLLMBase:
         def generate(self, *a, **kw): raise NotImplementedError
