@@ -20,7 +20,7 @@ class LLMConfig:
 @dataclass
 class ExecutionConfig:
     question: str
-    db_path: str
+    db_path: str | list[str]
     executor_type: str = "sqlite"
     max_depth: int = 3
     max_attempts_per_node: int = 3

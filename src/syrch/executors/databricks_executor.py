@@ -23,6 +23,7 @@ class DatabricksExecutor(BaseExecutor):
         client_id: str | None = None,
         client_secret: str | None = None,
         azure_tenant_id: str | None = None,
+        tables: list[str] | None = None,
     ):
         self.server_hostname = server_hostname or os.getenv("DATABRICKS_SERVER_HOSTNAME", "")
         self.http_path = http_path or os.getenv("DATABRICKS_HTTP_PATH", "")
@@ -33,6 +34,7 @@ class DatabricksExecutor(BaseExecutor):
         self.client_id = client_id or os.getenv("DATABRICKS_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("DATABRICKS_CLIENT_SECRET")
         self.azure_tenant_id = azure_tenant_id or os.getenv("AZURE_TENANT_ID")
+        self._tables = tables or []
         self._conn = None
 
     def _connect(self):
@@ -88,15 +90,25 @@ class DatabricksExecutor(BaseExecutor):
             columns = [desc[0] for desc in cursor.description]
             return pd.DataFrame([list(r) for r in rows], columns=columns)
 
+    @staticmethod
+    def _parse_fqn(fqn: str) -> tuple[str | None, str | None, str]:
+        parts = fqn.split(".")
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        if len(parts) == 2:
+            return None, parts[0], parts[1]
+        return None, None, parts[0]
+
     def get_schema(self, table_name: str | None = None) -> TableSchema:
         if table_name is None:
             table_name = self.list_tables()[0]
         if self._conn is None:
             self._connect()
         assert self._conn is not None
+        catalog, schema, table = self._parse_fqn(table_name)
         logger.debug("Fetching schema for table: %s", table_name)
         with self._conn.cursor() as cursor:
-            cursor.columns(catalog_name=self.catalog, schema_name=self.schema_name, table_name=table_name)
+            cursor.columns(catalog_name=catalog, schema_name=schema, table_name=table)
             columns = [
                 ColumnSchema(name=row[2], type=row[5])
                 for row in cursor.fetchall()
@@ -104,6 +116,8 @@ class DatabricksExecutor(BaseExecutor):
         return TableSchema(name=table_name, columns=columns)
 
     def list_tables(self) -> list[str]:
+        if self._tables:
+            return self._tables
         if self._conn is None:
             self._connect()
         assert self._conn is not None

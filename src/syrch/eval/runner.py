@@ -32,9 +32,16 @@ class BenchmarkResult:
     duration: float = 0.0
 
 
-def _create_executor(executor_type: str, db_path: str) -> BaseExecutor:
+def _normalize_db_path(db_path: str | list[str]) -> list[str]:
+    if isinstance(db_path, str):
+        return [p.strip() for p in db_path.split(",")]
+    return list(db_path)
+
+
+def _create_executor(executor_type: str, db_path: str | list[str]) -> BaseExecutor:
+    tables = _normalize_db_path(db_path)
     if executor_type == "sqlite":
-        return SQLiteExecutor(db_path)
+        return SQLiteExecutor(tables[0])
     if executor_type == "databricks-sql":
         try:
             from syrch.executors.databricks_executor import DatabricksExecutor
@@ -42,7 +49,7 @@ def _create_executor(executor_type: str, db_path: str) -> BaseExecutor:
             raise ImportError(
                 "executor_type='databricks-sql' requires: pip install syrch[databricks-sql]"
             )
-        return DatabricksExecutor()
+        return DatabricksExecutor(tables=tables)
     if executor_type == "spark":
         try:
             from syrch.executors.spark_executor import SparkExecutor
@@ -50,10 +57,10 @@ def _create_executor(executor_type: str, db_path: str) -> BaseExecutor:
             raise ImportError(
                 "executor_type='spark' requires: pip install syrch[spark]"
             )
-        return SparkExecutor()
+        return SparkExecutor(tables=tables)
     if executor_type == "jdbc":
         from syrch.executors.jdbc_executor import JDBCExecutor
-        return JDBCExecutor(db_path)
+        return JDBCExecutor(tables[0])
     raise ValueError(f"Unknown executor type: {executor_type}")
 
 

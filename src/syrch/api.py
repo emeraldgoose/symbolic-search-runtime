@@ -7,7 +7,7 @@ import pandas as pd
 
 from syrch.core.config import LLMConfig, merge_config
 from syrch.core.logging import LogConfig, setup_logging
-from syrch.core.models import NodeResult, ProblemSpec, TableSchema
+from syrch.core.models import NodeResult, ProblemSpec
 from syrch.eval.runner import _create_executor
 from syrch.executors.cached_executor import CachedExecutor
 from syrch.llm.base import BaseLLM
@@ -37,7 +37,7 @@ def _create_llm(config: LLMConfig) -> BaseLLM:
 
 def query(
     question: str,
-    db_path: str = "orders_10dim.sqlite",
+    db_path: str | list[str] = "orders_10dim.sqlite",
     executor_type: str = "sqlite",
     *,
     model: str = "qwen3.5-4b-4bit",
@@ -95,11 +95,9 @@ def query(
     if cache_obj:
         executor = CachedExecutor(executor, cache_obj)
 
-    schema = executor.get_schema()
-    if not isinstance(schema, TableSchema):
-        all_schemas = [executor.get_schema(t) for t in executor.list_tables()]
-    else:
-        all_schemas = [schema]
+    tables = executor.list_tables()
+    all_schemas = [executor.get_schema(t) for t in tables]
+    schema = all_schemas[0]
 
     problem = ProblemSpec(question=question, schema=schema, all_schemas=all_schemas)
 
