@@ -135,6 +135,7 @@ syrch/
 │   │   ├── sqlite_executor.py    # SQLite
 │   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
 │   │   ├── databricks_executor.py # Databricks SQL
+│   │   ├── spark_executor.py     # SparkSession (Databricks/EMR/standalone)
 │   │   └── cached_executor.py    # diskcache-backed SQL cache
 │   ├── llm/
 │   │   ├── base.py               # BaseLLM (ABC)
@@ -191,11 +192,11 @@ Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
 # Core (CLI + SQLite)
 pip install syrch
 
-# Databricks SQL Warehouse
-pip install "syrch[databricks]"
+# Databricks SQL Warehouse (external connection)
+pip install "syrch[databricks-sql]"
 
-# PySpark executor (inside Databricks Runtime)
-pip install "syrch[pyspark]"
+# Spark executor (Databricks Runtime, EMR, standalone)
+pip install "syrch[spark]"
 
 # Development (tests + lint)
 pip install -e ".[dev]"
@@ -213,7 +214,7 @@ from syrch import query
 
 result = query(
     question="What discount × shipping combo maximizes revenue?",
-    executor_type="databricks",
+    executor_type="databricks-sql",
     model="gpt-4o",
 )
 print(result.answer)
@@ -267,7 +268,7 @@ syrch benchmark benchmarks/orders.jsonl
 | `search` | `-q` / `--question` | Natural language problem (required) |
 | | `--db` | Database path (default: `orders_10dim.sqlite`) |
 | | `--max-depth` | Max D&C recursion depth (default: 3) |
-| | `--executor` | `sqlite` / `databricks` / `jdbc` |
+| | `--executor` | `sqlite` / `databricks-sql` / `spark` / `jdbc` |
 | | `--max-attempts` | Max RLM attempts per node (default: 3) |
 | | `--high-conf` | Confidence threshold for greedy stop (default: 0.85) |
 | | `--budget` | Token budget (default: 100000) |
@@ -455,6 +456,7 @@ class BaseExecutor(ABC):
 | `SQLiteExecutor` | SQLite | `sqlite3` (thread-safe via `threading.local`) |
 | `JDBCExecutor` | Any JDBC | SQLAlchemy |
 | `DatabricksExecutor` | Databricks SQL | `databricks-sql-connector` (PEP 249) |
+| `SparkExecutor` | SparkSession | `pyspark` (`SparkSession.builder.getOrCreate()`) |
 
 ## Caching
 

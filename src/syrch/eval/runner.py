@@ -35,9 +35,22 @@ class BenchmarkResult:
 def _create_executor(executor_type: str, db_path: str) -> BaseExecutor:
     if executor_type == "sqlite":
         return SQLiteExecutor(db_path)
-    if executor_type == "databricks":
-        from syrch.executors.databricks_executor import DatabricksExecutor
+    if executor_type == "databricks-sql":
+        try:
+            from syrch.executors.databricks_executor import DatabricksExecutor
+        except ImportError:
+            raise ImportError(
+                "executor_type='databricks-sql' requires: pip install syrch[databricks-sql]"
+            )
         return DatabricksExecutor()
+    if executor_type == "spark":
+        try:
+            from syrch.executors.spark_executor import SparkExecutor
+        except ImportError:
+            raise ImportError(
+                "executor_type='spark' requires: pip install syrch[spark]"
+            )
+        return SparkExecutor()
     if executor_type == "jdbc":
         from syrch.executors.jdbc_executor import JDBCExecutor
         return JDBCExecutor(db_path)

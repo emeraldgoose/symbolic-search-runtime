@@ -11,6 +11,7 @@ build/
 
 # SQLite databases (large binary files)
 *.sqlite
+*.db
 
 # OS
 .DS_Store
@@ -26,6 +27,9 @@ venv/
 
 # auto-generated reports
 autoresearch/reports/
+
+# docs (issue records, design notes, etc.)
+docs/
 
 # session logs (not committed)
 SESSION_*.md

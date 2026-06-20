@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def __getattr__(name: str) -> typing.Any:

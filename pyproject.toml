@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrch"
-version = "0.1.0"
+version = "0.1.1"
 description = "NL -> ProblemSpec -> Search(D&C+RLM) -> SQL Evaluation -> Optimal Solution"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,6 @@ dependencies = [
     "pydantic>=2.0",
     "openai>=1.0",
     "anthropic>=0.30",
-    "databricks-sql-connector>=4.0",
     "rich>=13.0",
     "pandas>=2.0",
     "diskcache>=5.6",
@@ -32,12 +31,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-databricks = [
+databricks-sql = [
     "databricks-sql-connector>=4.0",
     "databricks-sdk>=0.20",
     "azure-identity>=1.15",
 ]
-pyspark = ["pyspark>=3.5"]
+spark = ["pyspark>=3.5"]
 all = [
     "databricks-sql-connector>=4.0",
     "databricks-sdk>=0.20",

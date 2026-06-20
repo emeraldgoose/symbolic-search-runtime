@@ -136,6 +136,7 @@ syrch/
 │   │   ├── sqlite_executor.py    # SQLite
 │   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
 │   │   ├── databricks_executor.py # Databricks SQL
+│   │   ├── spark_executor.py     # SparkSession (Databricks/EMR/standalone)
 │   │   └── cached_executor.py    # diskcache 기반 SQL 캐시
 │   ├── llm/
 │   │   ├── base.py               # BaseLLM (ABC)
@@ -192,11 +193,11 @@ Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
 # 기본 (CLI + SQLite)
 pip install syrch
 
-# Databricks SQL Warehouse 연결
-pip install "syrch[databricks]"
+# Databricks SQL Warehouse (외부 접속)
+pip install "syrch[databricks-sql]"
 
-# PySpark executor (Databricks Runtime 내부)
-pip install "syrch[pyspark]"
+# Spark executor (Databricks Runtime, EMR, standalone 공용)
+pip install "syrch[spark]"
 
 # 개발용 (테스트 + 린트)
 pip install -e ".[dev]"
@@ -214,7 +215,7 @@ from syrch import query
 
 result = query(
     question="What discount × shipping combo maximizes revenue?",
-    executor_type="databricks",
+    executor_type="databricks-sql",
     model="gpt-4o",
 )
 print(result.answer)      # 최종 답변
@@ -265,7 +266,7 @@ syrch benchmark benchmarks/orders.jsonl
 | `search` | `-q` / `--question` | 자연어 문제 (필수) |
 | | `--db` | 데이터베이스 경로 (기본값: `orders_10dim.sqlite`) |
 | | `--max-depth` | 최대 D&C 재귀 깊이 (기본값: 3) |
-| | `--executor` | `sqlite` / `databricks` / `jdbc` |
+| | `--executor` | `sqlite` / `databricks-sql` / `spark` / `jdbc` |
 | | `--max-attempts` | 노드당 최대 RLM 시도 (기본값: 3) |
 | | `--high-conf` | 조기 중단을 위한 신뢰도 임계값 (기본값: 0.85) |
 | | `--budget` | 토큰 예산 (기본값: 100000) |
@@ -453,6 +454,7 @@ class BaseExecutor(ABC):
 | `SQLiteExecutor` | SQLite | `sqlite3` (thread-safe via `threading.local`) |
 | `JDBCExecutor` | Any JDBC | SQLAlchemy |
 | `DatabricksExecutor` | Databricks SQL | `databricks-sql-connector` (PEP 249) |
+| `SparkExecutor` | SparkSession | `pyspark` (`SparkSession.builder.getOrCreate()`) |
 
 ## 캐싱
 

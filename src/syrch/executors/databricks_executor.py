@@ -36,6 +36,14 @@ class DatabricksExecutor(BaseExecutor):
         self._conn = None
 
     def _connect(self):
+        if not self.server_hostname or not self.http_path:
+            raise ValueError(
+                "DatabricksExecutor requires DATABRICKS_SERVER_HOSTNAME and "
+                "DATABRICKS_HTTP_PATH environment variables. "
+                "Inside Databricks Runtime, use executor_type='spark' instead "
+                "with pip install syrch[spark]."
+            )
+
         from databricks import sql
 
         kwargs = dict(
