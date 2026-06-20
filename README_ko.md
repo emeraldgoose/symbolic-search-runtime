@@ -304,7 +304,7 @@ syrch benchmark benchmarks/orders.jsonl
 llm:
   provider: openai
   model: qwen3.5-4b-4bit
-  base_url: http://100.88.35.18:11434/v1
+  base_url: http://localhost:11434/v1
   temperature: 0.7
   max_tokens_per_call: 4096
   timeout_seconds: 120
@@ -328,7 +328,7 @@ execution:
 |------|------|------|
 | `SYRCH_MODEL` | `llm.model` | `gpt-4o` |
 | `SYRCH_API_KEY` | `llm.api_key` | `sk-...` |
-| `SYRCH_BASE_URL` | `llm.base_url` | `http://100.88.35.18:11434/v1` |
+| `SYRCH_BASE_URL` | `llm.base_url` | `http://localhost:11434/v1` |
 | `SYRCH_MAX_DEPTH` | `execution.max_depth` | `3` |
 | `SYRCH_VERBOSE` | `execution.verbose` | `true` |
 
