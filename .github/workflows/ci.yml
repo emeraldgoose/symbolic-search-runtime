@@ -29,4 +29,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
+      - run: python scripts/gen_fixtures.py
       - run: pytest tests/ -v --cov=src/syrch/ --cov-report=term-missing
