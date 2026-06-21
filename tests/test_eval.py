@@ -203,10 +203,10 @@ def test_load_benchmark_skips_empty_lines():
 
 def test_pipeline_with_real_db():
     """run_pipeline executes against a real SQLite DB and returns metrics."""
-    import os
-    db_path = "wikipedia_clickstream.sqlite"
-    if not os.path.exists(db_path):
-        pytest.skip("wikipedia_clickstream.sqlite not found")
+    from pathlib import Path
+    db_path = str(Path(__file__).resolve().parent / "fixtures" / "wikipedia_clickstream.sqlite")
+    if not Path(db_path).exists():
+        pytest.skip(f"Database file not found: {db_path}")
 
     from syrch.executors.sqlite_executor import SQLiteExecutor
     from syrch.core.models import ProblemSpec

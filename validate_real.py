@@ -44,8 +44,8 @@ from syrch.search.clarify import find_worst_ambiguity, generate_question
 LLM_MODEL = "qwen3.5-4b-4bit"
 LLM_FALLBACK_MODEL = "qwen3.5-4b-4bit"
 LLM_BASE_URL = "http://localhost:8000/v1"
-ORDERS_DB = "orders_10dim.sqlite"
-WIKI_DB = "wikipedia_clickstream.sqlite"
+ORDERS_DB = "tests/fixtures/orders_10dim.sqlite"
+WIKI_DB = "tests/fixtures/wikipedia_clickstream.sqlite"
 AMBIGUITY_THRESHOLD = 0.25
 AMBIGUOUS_KEYWORDS = {
     "best": 0.28,
