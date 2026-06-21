@@ -33,12 +33,7 @@ class OpenAILLM(BaseLLM):
     def __init__(self, model: str = "gpt-4o", api_key: str | None = None, base_url: str | None = None):
         self.model = model
         api_key = api_key or os.getenv("OPENAI_API_KEY")
-        kwargs = {}
-        if api_key:
-            kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-        self.client = OpenAI(**kwargs)  # type: ignore[arg-type]
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     def generate(self, system: str, user: str, **kwargs) -> LLMResponse:
         max_tokens = kwargs.get("max_tokens", 4096)
