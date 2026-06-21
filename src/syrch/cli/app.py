@@ -182,7 +182,7 @@ def search(
             all_schemas=spec.all_schemas,
         )
 
-    solution.clarification_qa = clarification_qa  # type: ignore[arg-type]
+    solution.clarification_qa = clarification_qa
     solution.clarified = bool(clarification_qa)
 
     if verbose:

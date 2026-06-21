@@ -11,6 +11,7 @@ from syrch.core.models import FinalSolution
 from syrch.eval.metrics import EvaluationMetrics, evaluate
 from syrch.executors.base import BaseExecutor
 from syrch.executors.sqlite_executor import SQLiteExecutor
+from syrch.llm.base import BaseLLM
 
 
 @dataclass
@@ -81,14 +82,12 @@ def _make_config(
     llm_config: LLMConfig | None = None,
     overrides: dict | None = None,
 ) -> ExecutionConfig:
-    cfg = dict(
+    config = ExecutionConfig(
         question=problem.question,
         db_path=problem.db,
         verbose=False,
-    )
-    if overrides:
-        cfg.update(overrides)
-    config = ExecutionConfig(**cfg)  # type: ignore[arg-type]
+        **(overrides or {}),
+    )  # fmt: skip
     if llm_config is not None:
         config.llm = llm_config
     return config
@@ -110,17 +109,18 @@ def run_single(
     t0 = time.time()
     try:
         llm_cfg = config.llm
+        llm: BaseLLM
         if llm_cfg.provider == "openai":
             llm = OpenAILLM(model=llm_cfg.model, api_key=llm_cfg.api_key, base_url=llm_cfg.base_url)
         elif llm_cfg.provider == "anthropic":
-            llm = AnthropicLLM(model=llm_cfg.model, api_key=llm_cfg.api_key)  # type: ignore[assignment]
+            llm = AnthropicLLM(model=llm_cfg.model, api_key=llm_cfg.api_key)
         else:
             raise ValueError(f"Unknown LLM provider: {llm_cfg.provider}")
 
         cache: CentralCache | None = None
         if config.cache_enabled:
             cache = CentralCache(ttl=config.cache_ttl)
-            llm = CachedLLM(llm, cache, model=config.llm.model, temperature=config.llm.temperature)  # type: ignore[assignment]
+            llm = CachedLLM(llm, cache, model=config.llm.model, temperature=config.llm.temperature)
 
         executor = _create_executor(config.executor_type, config.db_path)
         if cache:

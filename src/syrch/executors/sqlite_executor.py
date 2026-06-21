@@ -14,11 +14,12 @@ class SQLiteExecutor(BaseExecutor):
         self.path = path
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._main_conn = sqlite3.connect(path)
+        self._main_conn: sqlite3.Connection | None = sqlite3.connect(path)
 
     def _get_conn(self) -> sqlite3.Connection:
         thread_id = threading.get_ident()
         if thread_id == threading.main_thread().ident:
+            assert self._main_conn is not None
             return self._main_conn
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.path)
@@ -50,7 +51,7 @@ class SQLiteExecutor(BaseExecutor):
         with self._lock:
             if self._main_conn:
                 self._main_conn.close()
-                self._main_conn = None  # type: ignore[assignment]
+                self._main_conn = None
             if hasattr(self._local, "conn") and self._local.conn:
                 self._local.conn.close()
                 self._local.conn = None

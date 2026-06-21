@@ -28,13 +28,13 @@ class GridSearchConfig:
     @property
     def param_grid(self) -> list[dict[str, Any]]:
         keys = ["max_depth", "high_confidence", "max_attempts_per_node", "calibration_enabled"]
-        values = [
-            self.max_depth_values,
-            self.high_conf_values,
-            self.max_attempts_values,
-            self.calibration_values,
-        ]
-        return [dict(zip(keys, combo)) for combo in itertools.product(*values)]  # type: ignore[call-overload]
+        result: list[dict[str, Any]] = []
+        for md in self.max_depth_values:
+            for hc in self.high_conf_values:
+                for ma in self.max_attempts_values:
+                    for cal in self.calibration_values:
+                        result.append(dict(zip(keys, (md, hc, ma, cal))))
+        return result
 
     @property
     def total_cells(self) -> int:
