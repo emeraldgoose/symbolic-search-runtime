@@ -13,9 +13,6 @@ build/
 *.sqlite
 *.db
 
-# But keep test fixtures (small, <1MB each)
-!tests/fixtures/*.sqlite
-
 # OS
 .DS_Store
 
