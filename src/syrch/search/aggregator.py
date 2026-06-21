@@ -4,11 +4,34 @@ from collections import deque
 import re
 
 import pandas as pd
+from langdetect import detect, DetectorFactory, LangDetectException
 
 from syrch.core.config import ExecutionConfig
 from syrch.core.models import FinalSolution, JoinKey, NodeResult, TaskDAG
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
+
+DetectorFactory.seed = 0
+
+_LANG_MAP = {
+    "ko": "Korean", "ja": "Japanese", "zh-cn": "Chinese", "zh-tw": "Chinese",
+    "en": "English", "fr": "French", "de": "German", "es": "Spanish",
+    "pt": "Portuguese", "ru": "Russian", "ar": "Arabic", "vi": "Vietnamese",
+    "th": "Thai", "id": "Indonesian", "hi": "Hindi", "tr": "Turkish",
+    "it": "Italian", "nl": "Dutch", "pl": "Polish", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "cs": "Czech", "ro": "Romanian",
+    "hu": "Hungarian", "el": "Greek", "he": "Hebrew", "uk": "Ukrainian",
+}
+
+
+def _detect_language(text: str) -> str:
+    try:
+        code = detect(text)
+        return _LANG_MAP.get(code, "English")
+    except LangDetectException:
+        return "English"
+
+
 AGGREGATE_SYSTEM = """You are a result aggregator. You have received results from sub-tasks.
 Synthesize them into a final answer to the original question.
 
@@ -17,6 +40,7 @@ Original question: {question}
 Results from sub-tasks:
 {results}
 
+{language_instruction}
 Provide:
 1. A concise answer to the original question
 2. Supporting evidence from the data
@@ -77,9 +101,13 @@ class Aggregator:
         if merged is not None:
             all_data = merged
 
+        lang_name = _detect_language(question)
+        lang_instruction = f"Answer in {lang_name}." if lang_name != "English" else ""
+
         system = AGGREGATE_SYSTEM.format(
             question=question,
             results="\n".join(result_summaries),
+            language_instruction=lang_instruction,
         )
 
         response = self.llm.generate(system, "Provide the final answer.")
