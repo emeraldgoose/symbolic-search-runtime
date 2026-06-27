@@ -36,12 +36,12 @@ User Question
 │                   │
 │  각 노드:         │
 │  ┌─────────────┐  │
-│  │ RLM Agent    │  │  ← 3단계 검증 루프:
+│  │ RLM Agent    │  │  ← 5단계 검증 루프:
 │  │ 1. SQLGlot   │  │     1. 구문 검사 (sqlglot.parse_one)
 │  │    구문 검사  │  │     2. 스키마 AST 검사 (유효 컬럼)
-│  │ 2. Schema    │  │     3. 실행 + 품질 검사
-│  │    AST 검사   │  │     신뢰도 보정 적용
-│  │ 3. 실행       │  │
+│  │ 2. Schema    │  │     3. SQL 실행
+│  │    AST 검사   │  │     4. 품질 검사 (행 수, null)
+│  │ 3. 실행       │  │     5. 신뢰도 보정 적용
 │  │ 4. 품질 검사  │  │
 │  │ 5. 보정       │  │
 │  └─────────────┘  │
@@ -125,13 +125,18 @@ syrch/
 ├── .gitignore
 ├── benchmarks/example.jsonl
 ├── src/syrch/
-│   ├── __init__.py
-│   ├── cli/app.py                # Typer CLI
+│   ├── __init__.py               # Public API: query, SearchResult
+│   ├── api.py                    # query() 고수준 함수
+│   ├── cli/
+│   │   ├── __init__.py
+│   │   └── app.py                # Typer CLI
 │   ├── core/
+│   │   ├── __init__.py
 │   │   ├── models.py             # 데이터 타입 (dataclasses)
 │   │   ├── config.py             # ExecutionConfig + 설정 로더
 │   │   └── logging.py            # 구조화된 로깅
 │   ├── executors/
+│   │   ├── __init__.py
 │   │   ├── base.py               # BaseExecutor (ABC)
 │   │   ├── sqlite_executor.py    # SQLite
 │   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
@@ -139,11 +144,13 @@ syrch/
 │   │   ├── spark_executor.py     # SparkSession (Databricks/EMR/standalone)
 │   │   └── cached_executor.py    # diskcache 기반 SQL 캐시
 │   ├── llm/
+│   │   ├── __init__.py
 │   │   ├── base.py               # BaseLLM (ABC)
 │   │   ├── openai_llm.py         # OpenAI
 │   │   ├── anthropic_llm.py      # Anthropic Claude
 │   │   └── cache.py              # CachedLLM + CentralCache
 │   ├── search/
+│   │   ├── __init__.py
 │   │   ├── planner.py            # D&C: NL -> TaskDAG
 │   │   ├── scheduler.py          # DAG 실행 엔진
 │   │   ├── rlm_engine.py         # RLM REPL 루프
@@ -153,6 +160,7 @@ syrch/
 │   │   ├── grid.py               # Grid search
 │   │   └── pipeline.py           # 오케스트레이터
 │   └── eval/
+│       ├── __init__.py
 │       ├── runner.py             # 벤치마크 하네스
 │       ├── metrics.py            # 평가 메트릭
 │       └── report.py             # 리포트 내보내기

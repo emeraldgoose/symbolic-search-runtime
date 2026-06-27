@@ -36,12 +36,12 @@ User Question
 │                   │
 │  For each node:   │
 │  ┌─────────────┐  │
-│  │ RLM Agent    │  │  ← 3-step validation loop:
+│  │ RLM Agent    │  │  ← 5-step validation loop:
 │  │ 1. SQLGlot   │  │     1. Syntax check (sqlglot.parse_one)
 │  │    syntax    │  │     2. Schema AST check (valid columns)
-│  │ 2. Schema    │  │     3. Execute + quality check
-│  │    AST check │  │     Confidence calibration applied
-│  │ 3. Execute   │  │
+│  │ 2. Schema    │  │     3. Execute SQL
+│  │    AST check │  │     4. Quality check (row count, nulls)
+│  │ 3. Execute   │  │     5. Confidence calibration applied
 │  │ 4. Quality   │  │
 │  │ 5. Calibrate │  │
 │  └─────────────┘  │
@@ -124,13 +124,18 @@ syrch/
 ├── .gitignore
 ├── benchmarks/example.jsonl
 ├── src/syrch/
-│   ├── __init__.py
-│   ├── cli/app.py                # Typer CLI
+│   ├── __init__.py               # Public API: query, SearchResult
+│   ├── api.py                    # query() high-level function
+│   ├── cli/
+│   │   ├── __init__.py
+│   │   └── app.py                # Typer CLI
 │   ├── core/
+│   │   ├── __init__.py
 │   │   ├── models.py             # Data types (dataclasses)
 │   │   ├── config.py             # ExecutionConfig + config loader
 │   │   └── logging.py            # Structured logging
 │   ├── executors/
+│   │   ├── __init__.py
 │   │   ├── base.py               # BaseExecutor (ABC)
 │   │   ├── sqlite_executor.py    # SQLite
 │   │   ├── jdbc_executor.py      # JDBC via SQLAlchemy
@@ -138,11 +143,13 @@ syrch/
 │   │   ├── spark_executor.py     # SparkSession (Databricks/EMR/standalone)
 │   │   └── cached_executor.py    # diskcache-backed SQL cache
 │   ├── llm/
+│   │   ├── __init__.py
 │   │   ├── base.py               # BaseLLM (ABC)
 │   │   ├── openai_llm.py         # OpenAI
 │   │   ├── anthropic_llm.py      # Anthropic Claude
 │   │   └── cache.py              # CachedLLM + CentralCache
 │   ├── search/
+│   │   ├── __init__.py
 │   │   ├── planner.py            # D&C: NL -> TaskDAG
 │   │   ├── scheduler.py          # DAG execution engine
 │   │   ├── rlm_engine.py         # RLM REPL loop
@@ -152,6 +159,7 @@ syrch/
 │   │   ├── grid.py               # Grid search
 │   │   └── pipeline.py           # Orchestrator
 │   └── eval/
+│       ├── __init__.py
 │       ├── runner.py             # Benchmark harness
 │       ├── metrics.py            # Evaluation metrics
 │       └── report.py             # Report export
@@ -176,7 +184,7 @@ ProblemSpec { question, schema, all_schemas, goal_metric }
     │
     ▼
 TaskDAG { nodes: {A, B, C, ...}, root_id, topo_layers }
-    │  각 TaskNode: { id, description, depends_on, is_atomic, join_type }
+    │  Each TaskNode: { id, description, depends_on, is_atomic, join_type }
     ▼
 Scheduler → NodeResult { node_id, data(DataFrame), sql, confidence,
                          reasoning_paths, cost_tokens, error }
