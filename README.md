@@ -184,7 +184,7 @@ ProblemSpec { question, schema, all_schemas, goal_metric }
     │
     ▼
 TaskDAG { nodes: {A, B, C, ...}, root_id, topo_layers }
-    │  각 TaskNode: { id, description, depends_on, is_atomic, join_type }
+    │  Each TaskNode: { id, description, depends_on, is_atomic, join_type }
     ▼
 Scheduler → NodeResult { node_id, data(DataFrame), sql, confidence,
                          reasoning_paths, cost_tokens, error }
