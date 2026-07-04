@@ -9,6 +9,11 @@ build/
 # Cache
 .syrch/cache/
 
+# Benchmark generated artifacts
+benchmark/generated/
+spark-warehouse/
+benchmark_delta/
+
 # SQLite databases (large binary files)
 *.sqlite
 *.db
@@ -37,5 +42,5 @@ SESSION_*.md
 # AGENTS.md
 AGENTS.md
 
+# repo-level plans (PLAN.md is committed for project tracking)
 # PLAN.md
-PLAN.md

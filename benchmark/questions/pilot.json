@@ -1,0 +1,320 @@
+[
+  {
+    "id": "S1",
+    "question": "2024년 총 매출은 얼마인가?",
+    "question_en": "What is the total revenue for 2024?",
+    "escalation_group": "revenue",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "order",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["SUM", "WHERE"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["direct_query"],
+    "ground_truth_result_path": "generated/answers/pilot/S1.csv",
+    "ground_truth_sql": "SELECT SUM(total_amount) AS total_revenue FROM dw_sales_order WHERE order_date >= '2024-01-01' AND order_date < '2025-01-01'"
+  },
+  {
+    "id": "S2",
+    "question": "2024년 순매출은 얼마인가? (환불 제외)",
+    "question_en": "What is the net revenue for 2024? (excluding refunds)",
+    "escalation_group": "revenue",
+    "escalation_level": 2,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "order",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["SUM", "WHERE", "NOT", "refund"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["direct_query"],
+    "ground_truth_sql": "SELECT SUM(total_amount) AS net_revenue FROM dw_sales_order WHERE order_date >= '2024-01-01' AND order_date < '2025-01-01' AND status != 'refunded'"
+  },
+  {
+    "id": "S3",
+    "question": "2024년 VIP 고객의 순매출은 얼마인가? (구매 시점 기준)",
+    "question_en": "What is the net revenue from VIP customers in 2024? (based on their segment at time of purchase)",
+    "escalation_group": "revenue",
+    "escalation_level": 3,
+    "required_tables": ["dw_sales_order", "dw_customer"],
+    "required_domains": ["sales", "customer"],
+    "grain": "order",
+    "scd_required": true,
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 2,
+      "acceptable_variants": [["A->B"], ["A,B"]]
+    },
+    "expected_sql_patterns": ["SUM", "JOIN", "valid_from", "valid_to"],
+    "forbidden_sql_patterns": ["is_current = 1"],
+    "acceptable_patterns": ["scd_join", "subquery_scd"],
+    "ground_truth_sql": "SELECT SUM(o.total_amount) AS vip_net_revenue FROM dw_sales_order o JOIN dw_customer c ON o.customer_id = c.customer_id AND o.order_date >= c.valid_from AND (c.valid_to IS NULL OR o.order_date <= c.valid_to) WHERE o.order_date >= '2024-01-01' AND o.order_date < '2025-01-01' AND o.status != 'refunded' AND c.segment = 'VIP'"
+  },
+  {
+    "id": "S4",
+    "question": "2024년 광고를 통해 유입된 VIP 고객의 순매출은 얼마인가?",
+    "question_en": "What is the net revenue from VIP customers acquired via paid traffic in 2024?",
+    "escalation_group": "revenue",
+    "escalation_level": 4,
+    "required_tables": ["dw_sales_order", "dw_customer", "fact_event_log"],
+    "required_domains": ["sales", "customer", "marketing"],
+    "grain": "order",
+    "scd_required": true,
+    "dag_evaluation": {
+      "minimal_nodes": 3,
+      "optimal_nodes": 3,
+      "acceptable_variants": [
+        ["A->B->C"],
+        ["A,B->C"],
+        ["A->(B,C)"]
+      ]
+    },
+    "expected_sql_patterns": ["SUM", "JOIN", "paid", "traffic_source"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["dag_multi_join", "subquery_multi_join"],
+    "ground_truth_sql": "SELECT SUM(DISTINCT o.total_amount) AS paid_vip_net_revenue FROM dw_sales_order o JOIN dw_customer c ON o.customer_id = c.customer_id AND o.order_date >= c.valid_from AND (c.valid_to IS NULL OR o.order_date <= c.valid_to) JOIN fact_event_log e ON o.customer_id = e.customer_id AND e.event_type = 'purchase_complete' WHERE o.order_date >= '2024-01-01' AND o.order_date < '2025-01-01' AND o.status != 'refunded' AND c.segment = 'VIP' AND e.traffic_source = 'paid'"
+  },
+  {
+    "id": "S5",
+    "question": "2024년 월별 매출 추이를 보여줘",
+    "question_en": "Show the monthly revenue trend for 2024",
+    "escalation_group": "monthly_trend",
+    "escalation_level": 1,
+    "required_tables": ["mart_sales_monthly"],
+    "required_domains": ["sales"],
+    "grain": "monthly",
+    "expected_grain": "monthly",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["GROUP BY", "month"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["grain_mart", "grain_direct_sql"],
+    "ground_truth_sql": "SELECT sale_month, total_revenue FROM mart_sales_monthly WHERE sale_month LIKE '2024%' ORDER BY sale_month"
+  },
+  {
+    "id": "S6",
+    "question": "결제 후 배송까지 평균 소요 시간은 얼마인가?",
+    "question_en": "What is the average time from payment to delivery?",
+    "escalation_group": "fulfillment",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "order",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["AVG", "paid_at", "shipped_at"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["direct_query"],
+    "ground_truth_sql": "SELECT AVG(julianday(shipped_at) - julianday(paid_at)) AS avg_fulfillment_days FROM dw_sales_order WHERE paid_at IS NOT NULL AND shipped_at IS NOT NULL"
+  },
+  {
+    "id": "S7",
+    "question": "장바구니에 상품을 추가한 후 24시간 내 구매로 전환된 비율은?",
+    "question_en": "What is the cart-to-purchase conversion rate within 24 hours?",
+    "escalation_group": "funnel",
+    "escalation_level": 1,
+    "required_tables": ["fact_event_log"],
+    "required_domains": ["marketing"],
+    "grain": "event",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 2,
+      "acceptable_variants": [
+        ["A"],
+        ["A->B"]
+      ]
+    },
+    "expected_sql_patterns": ["session", "event_type"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["session_funnel", "cte_funnel"],
+    "ground_truth_sql": "WITH cart_sessions AS (SELECT DISTINCT session_id FROM fact_event_log WHERE event_type = 'cart_add'), purchase_sessions AS (SELECT DISTINCT session_id FROM fact_event_log WHERE event_type = 'purchase_complete') SELECT ROUND(CAST(COUNT(DISTINCT p.session_id) AS REAL) / NULLIF(COUNT(DISTINCT c.session_id), 0) * 100, 2) AS conversion_rate FROM cart_sessions c LEFT JOIN purchase_sessions p ON c.session_id = p.session_id"
+  },
+  {
+    "id": "S8",
+    "question": "Q4 GMV 대비 마케팅 비용 비율은?",
+    "question_en": "What is the marketing cost ratio to GMV in Q4?",
+    "escalation_group": "marketing_roi",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_order", "fact_campaign_impressions"],
+    "required_domains": ["sales", "marketing"],
+    "grain": "mixed",
+    "semantic_mapping": {"GMV": "dw_sales_order.total_amount"},
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 2,
+      "acceptable_variants": [
+        ["A->B"],
+        ["A,B"]
+      ]
+    },
+    "expected_sql_patterns": ["SUM", "JOIN"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["cross_domain_join", "dag_cross_domain"],
+    "ground_truth_sql": "WITH q4_gmv AS (SELECT SUM(total_amount) AS gmv FROM dw_sales_order WHERE order_date >= '2024-10-01' AND order_date < '2025-01-01' AND status != 'refunded'), q4_marketing AS (SELECT SUM(spend) AS total_spend FROM fact_campaign_impressions WHERE impression_date >= '2024-10-01' AND impression_date < '2025-01-01') SELECT ROUND(g.total_spend / gmv * 100, 2) AS marketing_cost_ratio FROM q4_gmv, q4_marketing g"
+  },
+  {
+    "id": "S9",
+    "question": "첫 구매 후 30일 내 재구매한 고객의 비율은?",
+    "question_en": "What percentage of customers made a second purchase within 30 days of their first?",
+    "escalation_group": "retention",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "customer",
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 2,
+      "acceptable_variants": [
+        ["A->B"],
+        ["A,B"]
+      ]
+    },
+    "expected_sql_patterns": ["ROW_NUMBER", "LAG", "MIN", "GROUP BY"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["window_function", "cte_window", "self_join"],
+    "ground_truth_sql": "WITH first_purchase AS (SELECT customer_id, MIN(order_date) AS first_order_date FROM dw_sales_order WHERE status = 'completed' GROUP BY customer_id), second_purchase AS (SELECT DISTINCT o.customer_id FROM dw_sales_order o JOIN first_purchase f ON o.customer_id = f.customer_id WHERE o.status = 'completed' AND o.order_date > f.first_order_date AND julianday(o.order_date) - julianday(f.first_order_date) <= 30) SELECT ROUND(CAST(COUNT(DISTINCT s.customer_id) AS REAL) / NULLIF(COUNT(DISTINCT f.customer_id), 0) * 100, 2) AS repeat_purchase_rate FROM first_purchase f LEFT JOIN second_purchase s ON f.customer_id = s.customer_id"
+  },
+  {
+    "id": "S10",
+    "question": "지난달 말 재고와 이번달 말 재고의 차이는?",
+    "question_en": "What is the difference in inventory between end of last month and end of this month?",
+    "escalation_group": "inventory",
+    "escalation_level": 1,
+    "required_tables": ["mart_sales_daily"],
+    "required_domains": ["sales"],
+    "grain": "daily",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["LAG", "window"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["window_function", "self_join"],
+    "ground_truth_sql": "WITH monthly AS (SELECT strftime('%Y-%m', sale_date) AS month, SUM(total_revenue) AS revenue, SUM(total_items_sold) AS items_sold FROM mart_sales_daily WHERE is_complete = 1 GROUP BY strftime('%Y-%m', sale_date)) SELECT month, items_sold, LAG(items_sold) OVER (ORDER BY month) AS prev_items_sold, items_sold - LAG(items_sold) OVER (ORDER BY month) AS difference FROM monthly ORDER BY month DESC LIMIT 2"
+  },
+  {
+    "id": "S11",
+    "question": "가장 이탈 위험이 높은 고객 세그먼트는?",
+    "question_en": "Which customer segment has the highest churn risk?",
+    "escalation_group": "churn",
+    "escalation_level": 1,
+    "required_tables": ["dw_customer", "dw_sales_order"],
+    "required_domains": ["sales", "customer"],
+    "grain": "customer",
+    "is_ambiguous": true,
+    "keywords": ["churn", "risk", "segment"],
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 3,
+      "acceptable_variants": [
+        ["A->B"],
+        ["A->B->C"],
+        ["A,B->C"]
+      ]
+    },
+    "expected_sql_patterns": ["GROUP BY", "MAX", "DATE"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["dag_churn", "cte_churn"],
+    "ground_truth_sql": "WITH last_order AS (SELECT customer_id, MAX(order_date) AS last_order_date FROM dw_sales_order GROUP BY customer_id), churn_risk AS (SELECT c.segment, COUNT(*) AS total_customers, SUM(CASE WHEN julianday('2024-12-31') - julianday(l.last_order_date) > 180 THEN 1 ELSE 0 END) AS churned_customers FROM dw_customer c LEFT JOIN last_order l ON c.customer_id = l.customer_id WHERE c.is_current = 1 GROUP BY c.segment) SELECT segment, ROUND(CAST(churned_customers AS REAL) / total_customers * 100, 2) AS churn_rate FROM churn_risk ORDER BY churn_rate DESC"
+  },
+  {
+    "id": "S12",
+    "question": "2024년과 2023년의 YoY 매출 성장률은?",
+    "question_en": "What is the YoY revenue growth rate from 2023 to 2024?",
+    "escalation_group": "revenue",
+    "escalation_level": 5,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "order",
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 2,
+      "acceptable_variants": [
+        ["A->B"],
+        ["A,B"]
+      ]
+    },
+    "expected_sql_patterns": ["SUM", "LAG", "CASE", "strftime"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["window_function", "cte_yoy", "subquery_yoy"],
+    "ground_truth_sql": "WITH yearly AS (SELECT strftime('%Y', order_date) AS year, SUM(total_amount) AS revenue FROM dw_sales_order WHERE status NOT IN ('refunded', 'cancelled') AND order_date >= '2023-01-01' AND order_date < '2025-01-01' GROUP BY strftime('%Y', order_date)) SELECT year, revenue, LAG(revenue) OVER (ORDER BY year) AS prev_revenue, ROUND((revenue - LAG(revenue) OVER (ORDER BY year)) / LAG(revenue) OVER (ORDER BY year) * 100, 2) AS yoy_growth FROM yearly"
+  },
+  {
+    "id": "S13",
+    "question": "평균 구매액보다 높은 매출을 올린 상위 5개 카테고리는?",
+    "question_en": "What are the top 5 categories by revenue that exceed the average order value?",
+    "escalation_group": "category_analysis",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_item", "dw_product", "dim_category"],
+    "required_domains": ["sales"],
+    "grain": "category",
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 3,
+      "acceptable_variants": [
+        ["A->B->C"],
+        ["A,B->C"]
+      ]
+    },
+    "expected_sql_patterns": ["HAVING", "GROUP BY", "SUM", "LIMIT"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["having_aggregate", "subquery_having", "cte_having"],
+    "ground_truth_sql": "WITH category_revenue AS (SELECT c.category_name, SUM(s.quantity * s.unit_price) AS total_revenue FROM dw_sales_item s JOIN dw_product p ON s.product_id = p.product_id JOIN dim_category c ON p.category_id = c.category_id GROUP BY c.category_name), avg_revenue AS (SELECT AVG(total_revenue) AS avg_val FROM category_revenue) SELECT cr.category_name, cr.total_revenue FROM category_revenue cr, avg_revenue ar WHERE cr.total_revenue > ar.avg_val ORDER BY cr.total_revenue DESC LIMIT 5"
+  },
+  {
+    "id": "S14",
+    "question": "환불 사유별 건수와 총 환불 금액은?",
+    "question_en": "What are the refund counts and total amounts by reason?",
+    "escalation_group": "refund_analysis",
+    "escalation_level": 1,
+    "required_tables": ["dw_sales_order"],
+    "required_domains": ["sales"],
+    "grain": "order",
+    "dag_evaluation": {
+      "minimal_nodes": 1,
+      "optimal_nodes": 1,
+      "acceptable_variants": [["A"]]
+    },
+    "expected_sql_patterns": ["GROUP BY", "COUNT", "SUM", "refund"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["direct_query"],
+    "ground_truth_sql": "SELECT status, COUNT(*) AS refund_count, SUM(total_amount) AS total_refund_amount FROM dw_sales_order WHERE status = 'refunded' GROUP BY status"
+  },
+  {
+    "id": "S15",
+    "question": "2024년 공휴일을 제외한 일별 평균 매출은?",
+    "question_en": "What is the average daily revenue in 2024 excluding holidays?",
+    "escalation_group": "daily_avg",
+    "escalation_level": 1,
+    "required_tables": ["mart_sales_daily", "dim_date"],
+    "required_domains": ["sales"],
+    "grain": "daily",
+    "dag_evaluation": {
+      "minimal_nodes": 2,
+      "optimal_nodes": 2,
+      "acceptable_variants": [
+        ["A->B"],
+        ["A,B"]
+      ]
+    },
+    "expected_sql_patterns": ["AVG", "JOIN", "is_holiday"],
+    "forbidden_sql_patterns": [],
+    "acceptable_patterns": ["join_filter", "subquery_filter"],
+    "ground_truth_sql": "SELECT AVG(d.total_revenue) AS avg_daily_revenue_excl_holidays FROM mart_sales_daily d JOIN dim_date dt ON d.sale_date = dt.date_key WHERE dt.year = 2024 AND dt.is_holiday = 0 AND d.is_complete = 1"
+  }
+]

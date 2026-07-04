@@ -1,2 +1,0 @@
-{"id": "click-type-traffic", "question": "Which click type generates the most traffic?", "db": "wikipedia_clickstream.sqlite"}
-{"id": "orders-priority", "question": "What is the order priority distribution?", "db": "orders_10dim.sqlite"}

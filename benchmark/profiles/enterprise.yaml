@@ -1,0 +1,23 @@
+# Enterprise profile — 90 tables, ~10M sampled rows (100M logical)
+# For production-grade validation
+seed: 456
+batch_size: 100000
+
+schema:
+  include:
+    - sales.yaml
+    - customer.yaml
+    - marketing.yaml
+    - metadata.yaml
+    - noise.yaml
+
+quality:
+  null_ratio: 0.03
+  fk_break_ratio: 0.01
+  duplicate_ratio: 0.01
+  late_arrival_ratio: 0.02
+  outlier_ratio: 0.01
+
+output:
+  sqlite:
+    path: benchmark/generated/sqlite/benchmark_enterprise.sqlite
