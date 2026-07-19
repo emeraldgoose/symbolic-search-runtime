@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -92,22 +93,42 @@ def load_ground_truth_summary(questions_name: str) -> dict:
     return {}
 
 
-def _simulate_query(q: dict, db_path: str) -> tuple:
+def _simulate_query(q: dict, db_path: str | list[str], executor_type: str = "sqlite") -> tuple:
     """Dry-run: execute ground truth SQL and return as mock syrch result."""
-    import sqlite3
-    conn = sqlite3.connect(db_path)
+    gt_sql = q.get("ground_truth_sql", "")
+    if not gt_sql:
+        return None, "", [], [], None
+
     try:
-        gt_sql = q.get("ground_truth_sql", "")
-        if not gt_sql:
-            return None, "", [], [], None
-        df = pd.read_sql_query(gt_sql, conn)
+        if executor_type == "databricks-sql":
+            from databricks import sql as dbsql
+            conn = dbsql.connect(
+                server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME", ""),
+                http_path=os.getenv("DATABRICKS_HTTP_PATH", ""),
+                access_token=os.getenv("DATABRICKS_TOKEN", ""),
+                catalog=os.getenv("DATABRICKS_CATALOG"),
+                schema=os.getenv("DATABRICKS_SCHEMA"),
+            )
+            with conn.cursor() as cursor:
+                cursor.execute(gt_sql)
+                rows = cursor.fetchall()
+                if not rows:
+                    df = pd.DataFrame()
+                else:
+                    columns = [desc[0] for desc in cursor.description]
+                    df = pd.DataFrame([list(r) for r in rows], columns=columns)
+            conn.close()
+        else:
+            import sqlite3
+            conn = sqlite3.connect(db_path if isinstance(db_path, str) else db_path[0])
+            df = pd.read_sql_query(gt_sql, conn)
+            conn.close()
+
         tables = _extract_tables_from_sql(gt_sql)
         dag_nodes = _guess_dag_from_tables(tables, q)
         return df, gt_sql, tables, dag_nodes, None
     except Exception as e:
         return None, "", [], [], str(e)
-    finally:
-        conn.close()
 
 
 def _extract_tables_from_sql(sql: str) -> list[str]:
@@ -196,6 +217,9 @@ def run_benchmark(
     profile_name: str = "small",
     questions_name: str = "pilot",
     model: str = "qwen3.5-4b-4bit",
+    executor_type: str = "sqlite",
+    base_url: str | None = None,
+    api_key: str | None = None,
     quick: bool = False,
     dry_run: bool = False,
     skip_cache: bool = False,
@@ -205,13 +229,22 @@ def run_benchmark(
     profile = load_profile(profile_name)
     questions = load_questions(questions_name)
 
-    sqlite_cfg = profile.get("output", {}).get("sqlite", {})
-    db_path = Path(sqlite_cfg["path"])
-
-    if not db_path.exists():
-        print(f"Database not found: {db_path}")
-        print("Run: python benchmark/generator/gen_business_db.py --profile {profile_name}")
-        sys.exit(1)
+    if executor_type == "sqlite":
+        sqlite_cfg = profile.get("output", {}).get("sqlite", {})
+        db_path: str | list[str] = str(Path(sqlite_cfg["path"]))
+        if not Path(db_path).exists():
+            print(f"Database not found: {db_path}")
+            print("Run: python benchmark/generator/gen_business_db.py --profile {profile_name}")
+            sys.exit(1)
+    else:
+        _SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "benchmark" / "schema"
+        fqns = []
+        for f in sorted(_SCHEMA_DIR.glob("*.yaml")):
+            with open(f) as fh:
+                data = yaml.safe_load(fh)
+            for tname in data.get("tables", {}).keys():
+                fqns.append(f"{tname}")
+        db_path = fqns
 
     ground_truth = load_ground_truth(questions_name)
     gt_summary = load_ground_truth_summary(questions_name)
@@ -238,16 +271,18 @@ def run_benchmark(
         t0 = time.time()
 
         if dry_run:
-            result_df, result_sql, tables_used, dag_nodes, exec_error = _simulate_query(q, str(db_path))
+            result_df, result_sql, tables_used, dag_nodes, exec_error = _simulate_query(q, db_path, executor_type)
             duration = time.time() - t0
             print(f"  [DRY-RUN] Tables: {tables_used}, DAG nodes: {len(dag_nodes)}")
         else:
             try:
                 sr = query(
                     question=q.get("question_en", q["question"]),
-                    db_path=str(db_path),
-                    executor_type="sqlite",
+                    db_path=db_path,
+                    executor_type=executor_type,
                     model=model,
+                    base_url=base_url,
+                    api_key=api_key,
                     cache=not skip_cache,
                     verbose=verbose,
                 )
@@ -420,6 +455,10 @@ def main() -> None:
     parser.add_argument("--profile", default="small", help="Profile name")
     parser.add_argument("--questions", default="pilot", help="Questions file (without .json)")
     parser.add_argument("--model", default="qwen3.5-4b-4bit", help="LLM model name")
+    parser.add_argument("--executor", default="sqlite", choices=["sqlite", "databricks-sql", "spark"],
+                        help="Executor type")
+    parser.add_argument("--base-url", help="LLM API base URL (e.g. http://localhost:11434/v1)")
+    parser.add_argument("--api-token", help="LLM API key / token")
     parser.add_argument("--quick", action="store_true", help="L1-L2 only")
     parser.add_argument("--dry-run", action="store_true", help="Execute ground truth SQL instead of syrch (no LLM needed)")
     parser.add_argument("--skip-cache", action="store_true", help="Bypass disk cache")
@@ -432,6 +471,9 @@ def main() -> None:
         profile_name=args.profile,
         questions_name=args.questions,
         model=args.model,
+        executor_type=args.executor,
+        base_url=args.base_url,
+        api_key=args.api_token,
         quick=args.quick,
         dry_run=args.dry_run,
         skip_cache=args.skip_cache,
