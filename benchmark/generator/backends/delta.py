@@ -25,14 +25,15 @@ def _to_spark_type(t: str) -> str:
     return _TYPE_MAP.get(t.upper(), "STRING")
 
 
-def _ddl(table: TableDef) -> str:
+def _ddl(table: TableDef, catalog: str, schema: str) -> str:
     col_defs: list[str] = []
     for c in table.columns:
         spark_type = _to_spark_type(c.type)
         nullable = "" if c.pk else ""
         col_defs.append(f"  {c.name} {spark_type}{nullable}")
 
-    return f"CREATE TABLE IF NOT EXISTS {table.name} (\n" + ",\n".join(col_defs) + "\n) USING DELTA"
+    tb_name = f"{catalog}.{schema}.{table.name}"
+    return f"CREATE TABLE IF NOT EXISTS {tb_name} (\n" + ",\n".join(col_defs) + "\n) USING DELTA"
 
 
 class DeltaBackend(Backend):
@@ -45,18 +46,32 @@ class DeltaBackend(Backend):
         cluster_by: dict[str, list[str]] | None = None,
         optimize: bool = True,
         tblproperties: dict[str, str] | None = None,
+        mode: str = "local",
+        spark_session=None,
     ):
-        from pyspark.sql import SparkSession
+        if spark_session is not None:
+            self.spark = spark_session
+        else:
+            from pyspark.sql import SparkSession
 
-        builder = SparkSession.builder.appName("syrch-benchmark")
-        if location:
-            builder.config("spark.sql.warehouse.dir", location)
-        self.spark = builder.config(
-            "spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension"
-        ).config(
-            "spark.sql.catalog.spark_catalog",
-            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        ).getOrCreate()
+            if mode == "local":
+                saved = os.environ.pop("SPARK_REMOTE", None)
+                builder = SparkSession.builder.appName("syrch-benchmark") \
+                    .master("local[*]")
+            else:
+                builder = SparkSession.builder.appName("syrch-benchmark")
+
+            if location:
+                builder.config("spark.sql.warehouse.dir", location)
+            self.spark = builder.config(
+                "spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension"
+            ).config(
+                "spark.sql.catalog.spark_catalog",
+                "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+            ).getOrCreate()
+
+            if mode == "local" and saved is not None:
+                os.environ["SPARK_REMOTE"] = saved
 
         self.catalog = catalog
         self.schema_name = schema
@@ -69,7 +84,10 @@ class DeltaBackend(Backend):
             "delta.autoOptimize.autoCompact": "true",
         }
 
-        self.spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+        try:
+            self.spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+        except Exception:
+            logger.warning("Could not create catalog '%s' — assuming it exists", catalog)
         self.spark.sql(f"USE CATALOG {catalog}")
         self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
         self.spark.sql(f"USE {schema}")
@@ -77,7 +95,7 @@ class DeltaBackend(Backend):
     def create_table(self, table: TableDef) -> None:
         tb_name = f"{self.catalog}.{self.schema_name}.{table.name}"
         self.spark.sql(f"DROP TABLE IF EXISTS {tb_name}")
-        self.spark.sql(_ddl(table))
+        self.spark.sql(_ddl(table, self.catalog, self.schema_name))
 
         if table.comment:
             escaped = table.comment.replace("'", "\\'")
