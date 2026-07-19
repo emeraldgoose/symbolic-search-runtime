@@ -102,14 +102,20 @@ def _simulate_query(q: dict, db_path: str | list[str], executor_type: str = "sql
     try:
         if executor_type == "databricks-sql":
             from databricks import sql as dbsql
+            catalog = os.getenv("DATABRICKS_CATALOG")
+            schema = os.getenv("DATABRICKS_SCHEMA")
             conn = dbsql.connect(
                 server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME", ""),
                 http_path=os.getenv("DATABRICKS_HTTP_PATH", ""),
                 access_token=os.getenv("DATABRICKS_TOKEN", ""),
-                catalog=os.getenv("DATABRICKS_CATALOG"),
-                schema=os.getenv("DATABRICKS_SCHEMA"),
+                catalog=catalog,
+                schema=schema,
             )
             with conn.cursor() as cursor:
+                if catalog:
+                    cursor.execute(f"USE CATALOG {catalog}")
+                if schema:
+                    cursor.execute(f"USE SCHEMA {schema}")
                 cursor.execute(gt_sql)
                 rows = cursor.fetchall()
                 if not rows:

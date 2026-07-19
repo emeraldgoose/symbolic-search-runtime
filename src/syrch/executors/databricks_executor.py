@@ -83,6 +83,10 @@ class DatabricksExecutor(BaseExecutor):
         assert self._conn is not None
         logger.debug("Executing SQL on Databricks (%s chars)", len(sql))
         with self._conn.cursor() as cursor:
+            if self.catalog:
+                cursor.execute(f"USE CATALOG {self.catalog}")
+            if self.schema_name:
+                cursor.execute(f"USE SCHEMA {self.schema_name}")
             cursor.execute(sql)
             rows = cursor.fetchall()
             if not rows:
