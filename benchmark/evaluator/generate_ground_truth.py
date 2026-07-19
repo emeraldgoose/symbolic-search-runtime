@@ -96,9 +96,14 @@ def _connect_databricks(
     return conn
 
 
-def _connect_spark():
+def _connect_spark(catalog: str | None = None, schema: str | None = None):
     from pyspark.sql import SparkSession
-    return SparkSession.builder.getOrCreate()
+    spark = SparkSession.builder.getOrCreate()
+    if catalog:
+        spark.sql(f"USE CATALOG {catalog}")
+    if schema:
+        spark.sql(f"USE {schema}")
+    return spark
 
 
 def _execute_gt_sql(conn, gt_sql: str, executor_type: str) -> pd.DataFrame:
@@ -152,7 +157,7 @@ def generate_ground_truth(
             schema=db_schema,
         )
     elif executor_type == "spark":
-        conn = _connect_spark()
+        conn = _connect_spark(catalog=db_catalog, schema=db_schema)
     else:
         conn = _connect_sqlite(profile, db_path)
 
