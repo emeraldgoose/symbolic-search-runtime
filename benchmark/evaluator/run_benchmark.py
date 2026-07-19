@@ -25,15 +25,26 @@ import numpy as np
 import pandas as pd
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# Support both local and Databricks Workspace repo layouts
+_repo_root = Path(__file__).resolve().parent.parent.parent
+if not (_repo_root / "pyproject.toml").exists():
+    _repo_root = Path(__file__).resolve().parent.parent.parent.parent
+if not (_repo_root / "pyproject.toml").exists():
+    _repo_root = Path("/Workspace") / "Users" / os.getenv("USER", "") / "symbolic-search-runtime"
+sys.path.insert(0, str(_repo_root))
+
+# src-layout: pyproject.toml has [tool.setuptools.packages.find] {where = ["src"]}
+_src = _repo_root / "src"
+if _src.exists():
+    sys.path.insert(0, str(_src))
 
 from syrch import query
 from benchmark.evaluator.errors import classify, summarize
 
 
-_PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles"
-_QUESTIONS_DIR = Path(__file__).resolve().parent.parent / "questions"
-_GENERATED_DIR = Path(__file__).resolve().parent.parent / "generated"
+_PROFILES_DIR = _repo_root / "benchmark" / "profiles"
+_QUESTIONS_DIR = _repo_root / "benchmark" / "questions"
+_GENERATED_DIR = _repo_root / "benchmark" / "generated"
 
 
 @dataclass
@@ -231,9 +242,34 @@ def run_benchmark(
     skip_cache: bool = False,
     verbose: bool = False,
     max_level: int = 5,
+    db_catalog: str | None = None,
+    db_schema: str | None = None,
+    server_hostname: str | None = None,
+    http_path: str | None = None,
+    token: str | None = None,
 ) -> list[QuestionResult]:
     profile = load_profile(profile_name)
     questions = load_questions(questions_name)
+
+    if executor_type != "sqlite":
+        if server_hostname:
+            os.environ.setdefault("DATABRICKS_SERVER_HOSTNAME", server_hostname)
+        if http_path:
+            os.environ.setdefault("DATABRICKS_HTTP_PATH", http_path)
+        if token:
+            os.environ.setdefault("DATABRICKS_TOKEN", token)
+        if db_catalog:
+            os.environ.setdefault("DATABRICKS_CATALOG", db_catalog)
+        if db_schema:
+            os.environ.setdefault("DATABRICKS_SCHEMA", db_schema)
+        if not db_catalog:
+            delta_cfg = profile.get("output", {}).get("delta", {})
+            db_catalog = delta_cfg.get("catalog") or os.getenv("DATABRICKS_CATALOG")
+            db_schema = delta_cfg.get("schema") or os.getenv("DATABRICKS_SCHEMA")
+            if db_catalog:
+                os.environ.setdefault("DATABRICKS_CATALOG", db_catalog)
+            if db_schema:
+                os.environ.setdefault("DATABRICKS_SCHEMA", db_schema)
 
     if executor_type == "sqlite":
         sqlite_cfg = profile.get("output", {}).get("sqlite", {})
@@ -241,9 +277,9 @@ def run_benchmark(
         if not Path(db_path).exists():
             print(f"Database not found: {db_path}")
             print("Run: python benchmark/generator/gen_business_db.py --profile {profile_name}")
-            sys.exit(1)
+            return []
     else:
-        _SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "benchmark" / "schema"
+        _SCHEMA_DIR = _repo_root / "benchmark" / "schema"
         fqns = []
         for f in sorted(_SCHEMA_DIR.glob("*.yaml")):
             with open(f) as fh:
