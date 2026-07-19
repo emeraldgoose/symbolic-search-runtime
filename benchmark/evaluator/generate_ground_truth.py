@@ -196,7 +196,10 @@ def generate_ground_truth(
                 print(f"  ERROR {qid}: {e}")
                 results.append({"id": qid, "error": str(e)})
     finally:
-        conn.close()
+        if executor_type == "spark":
+            conn.stop()
+        else:
+            conn.close()
 
     summary_path = answers_dir / "_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
