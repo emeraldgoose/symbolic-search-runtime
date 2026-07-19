@@ -80,8 +80,8 @@ def load_questions(name: str) -> list[dict]:
         return json.load(f)
 
 
-def load_ground_truth(questions_name: str) -> dict[str, pd.DataFrame]:
-    answers_dir = _GENERATED_DIR / "answers" / questions_name
+def load_ground_truth(questions_name: str, gt_dir: str | None = None) -> dict[str, pd.DataFrame]:
+    answers_dir = Path(gt_dir) if gt_dir else _GENERATED_DIR / "answers" / questions_name
     results: dict[str, pd.DataFrame] = {}
     if not answers_dir.exists():
         return results
@@ -247,6 +247,7 @@ def run_benchmark(
     server_hostname: str | None = None,
     http_path: str | None = None,
     token: str | None = None,
+    gt_dir: str | None = None,
 ) -> list[QuestionResult]:
     profile = load_profile(profile_name)
     questions = load_questions(questions_name)
@@ -288,7 +289,7 @@ def run_benchmark(
                 fqns.append(f"{tname}")
         db_path = fqns
 
-    ground_truth = load_ground_truth(questions_name)
+    ground_truth = load_ground_truth(questions_name, gt_dir=gt_dir)
     gt_summary = load_ground_truth_summary(questions_name)
 
     if quick:
