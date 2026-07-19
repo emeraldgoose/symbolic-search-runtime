@@ -102,8 +102,8 @@ def _execute_gt_sql(conn, gt_sql: str, executor_type: str) -> pd.DataFrame:
 
 
 def generate_ground_truth(
-    profile_name: str,
-    questions_name: str,
+    profile_name: str = "small",
+    questions_name: str = "pilot",
     db_path: str | None = None,
     executor_type: str = "sqlite",
     output_dir: str | None = None,
