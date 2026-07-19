@@ -458,7 +458,7 @@ def main() -> None:
     parser.add_argument("--executor", default="sqlite", choices=["sqlite", "databricks-sql", "spark"],
                         help="Executor type")
     parser.add_argument("--base-url", help="LLM API base URL (e.g. http://localhost:11434/v1)")
-    parser.add_argument("--api-token", help="LLM API key / token")
+    parser.add_argument("--api-key", help="LLM API key / token")
     parser.add_argument("--quick", action="store_true", help="L1-L2 only")
     parser.add_argument("--dry-run", action="store_true", help="Execute ground truth SQL instead of syrch (no LLM needed)")
     parser.add_argument("--skip-cache", action="store_true", help="Bypass disk cache")
@@ -473,7 +473,7 @@ def main() -> None:
         model=args.model,
         executor_type=args.executor,
         base_url=args.base_url,
-        api_key=args.api_token,
+        api_key=args.api_key,
         quick=args.quick,
         dry_run=args.dry_run,
         skip_cache=args.skip_cache,
