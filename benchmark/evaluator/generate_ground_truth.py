@@ -67,14 +67,29 @@ def _connect_sqlite(profile, db_path: str | None):
     return sqlite3.connect(str(db))
 
 
-def _connect_databricks():
+def _connect_databricks(
+    server_hostname: str | None = None,
+    http_path: str | None = None,
+    access_token: str | None = None,
+    catalog: str | None = None,
+    schema: str | None = None,
+):
     from databricks import sql as dbsql
-    catalog = os.getenv("DATABRICKS_CATALOG")
-    schema = os.getenv("DATABRICKS_SCHEMA")
+    server_hostname = server_hostname or os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST")
+    http_path = http_path or os.getenv("DATABRICKS_HTTP_PATH")
+    access_token = access_token or os.getenv("DATABRICKS_TOKEN")
+    catalog = catalog or os.getenv("DATABRICKS_CATALOG")
+    schema = schema or os.getenv("DATABRICKS_SCHEMA")
+    if not server_hostname or not http_path:
+        raise ValueError(
+            "Databricks connection requires server_hostname and http_path. "
+            "Set DATABRICKS_SERVER_HOSTNAME and DATABRICKS_HTTP_PATH env vars "
+            "or pass them directly."
+        )
     conn = dbsql.connect(
-        server_hostname=os.getenv("DATABRICKS_SERVER_HOSTNAME", ""),
-        http_path=os.getenv("DATABRICKS_HTTP_PATH", ""),
-        access_token=os.getenv("DATABRICKS_TOKEN", ""),
+        server_hostname=server_hostname,
+        http_path=http_path,
+        access_token=access_token,
         catalog=catalog,
         schema=schema,
     )
@@ -107,17 +122,28 @@ def generate_ground_truth(
     db_path: str | None = None,
     executor_type: str = "sqlite",
     output_dir: str | None = None,
+    server_hostname: str | None = None,
+    http_path: str | None = None,
+    token: str | None = None,
+    db_catalog: str | None = None,
+    db_schema: str | None = None,
 ) -> list[dict]:
     profile = load_profile(profile_name)
     questions = load_questions(questions_name)
 
     if executor_type != "sqlite":
         delta_cfg = profile.get("output", {}).get("delta", {})
-        os.environ.setdefault("DATABRICKS_CATALOG", delta_cfg.get("catalog", ""))
-        os.environ.setdefault("DATABRICKS_SCHEMA", delta_cfg.get("schema", ""))
+        db_catalog = db_catalog or delta_cfg.get("catalog")
+        db_schema = db_schema or delta_cfg.get("schema")
 
     if executor_type == "databricks-sql":
-        conn = _connect_databricks()
+        conn = _connect_databricks(
+            server_hostname=server_hostname,
+            http_path=http_path,
+            access_token=token,
+            catalog=db_catalog,
+            schema=db_schema,
+        )
     else:
         conn = _connect_sqlite(profile, db_path)
 
@@ -174,20 +200,18 @@ def main() -> None:
     parser.add_argument("--executor", default="sqlite", choices=["sqlite", "databricks-sql"],
                         help="Executor type")
     parser.add_argument("--output-dir", help="Override output directory for CSVs")
+    parser.add_argument("--server-hostname", help="Databricks server hostname")
+    parser.add_argument("--http-path", help="Databricks HTTP path")
+    parser.add_argument("--token", help="Databricks access token")
+    parser.add_argument("--catalog", help="Databricks catalog name")
+    parser.add_argument("--schema", help="Databricks schema name")
     args = parser.parse_args()
     generate_ground_truth(
         args.profile, args.questions, args.db,
         executor_type=args.executor, output_dir=args.output_dir,
+        server_hostname=args.server_hostname, http_path=args.http_path,
+        token=args.token, db_catalog=args.catalog, db_schema=args.schema,
     )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate ground truth result CSVs")
-    parser.add_argument("--profile", default="small", help="Profile name")
-    parser.add_argument("--questions", default="pilot", help="Questions file (without .json)")
-    parser.add_argument("--db", help="Override DB path (optional)")
-    args = parser.parse_args()
-    generate_ground_truth(args.profile, args.questions, args.db)
 
 
 if __name__ == "__main__":
