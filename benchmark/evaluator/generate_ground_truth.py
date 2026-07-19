@@ -196,9 +196,7 @@ def generate_ground_truth(
                 print(f"  ERROR {qid}: {e}")
                 results.append({"id": qid, "error": str(e)})
     finally:
-        if executor_type == "spark":
-            conn.stop()
-        else:
+        if executor_type != "spark":
             conn.close()
 
     summary_path = answers_dir / "_summary.json"
