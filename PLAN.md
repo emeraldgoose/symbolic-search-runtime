@@ -11,58 +11,84 @@ Evaluation targets: **Retriever**, **Planner**, and **SQL Generator** independen
 
 ---
 
-## Current Status (Phase 1 Complete ✅)
+## Current Status (Phase 1 Complete ✅, Phase 2 In Progress)
 
 ### What exists
 
 #### Generator (`benchmark/generator/`)
-- **31 tables** across 5 YAML schema files (Sales, Customer, Marketing, Metadata, Noise)
+- **35 tables** across 5 YAML schema files (Sales, Customer, Marketing, Metadata, Noise)
 - **ODS/DW/Mart/Legacy** layer structure with real-world complexity
 - Quality injection: nulls, FK breaks, outliers, duplicates, late-arriving data
-- **SQLiteBackend** (working) + **DeltaBackend** (working, needs pyspark)
-- Profiles: small (50K rows), medium (3M), enterprise (10M)
+- **SQLiteBackend** (working) + **DeltaBackend** (working, local & Databricks)
+- Profiles: small (50K rows), medium (3M), enterprise (10M), databricks-enterprise
 - Fully generated: `benchmark/generated/sqlite/benchmark_small.sqlite` (104MB, 31 tables)
 
 #### Questions (`benchmark/questions/`)
 - `pilot.json` — 15 questions (L1-L5) covering revenue, funnel, SCD, churn, cross-domain, temporal, semantic
 - Each question includes: `ground_truth_sql`, `required_tables`, `dag_evaluation`, `grain`, error taxonomy fields
 
-#### Evaluator — Phase 1 (`benchmark/evaluator/`)
+#### Evaluator (`benchmark/evaluator/`)
 | Component | File | Status |
 |-----------|------|--------|
 | Ground Truth Generator | `generate_ground_truth.py` | ✅ Executes `ground_truth_sql` → CSV saved to `generated/answers/pilot/{id}.csv` |
-| Error Classifier | `errors.py` | ✅ Rule-based Error Taxonomy (10 types): wrong_table, wrong_column, wrong_grain, wrong_join, wrong_filter, wrong_time, wrong_scd, wrong_semantic, planner_error, retriever_error |
-| Benchmark Runner | `run_benchmark.py` | ✅ End-to-end: loads questions → runs `syrch.query()` → compares results → classifies errors → 3-axis report. Supports `--dry-run`, `--quick`, `--export JSON` |
-| Old Validator | `validate_business.py` | ✅ Backward compatible (ground truth SQL validation only) |
+| Error Classifier | `errors.py` | ✅ Rule-based Error Taxonomy (10 types) |
+| Benchmark Runner | `run_benchmark.py` | ✅ Multi-executor (sqlite/databricks-sql/spark), `--base-url`, `--api-key`, `gt_dir`, importable from notebooks |
+| Old Validator | `validate_business.py` | ✅ Backward compatible |
 
-#### syrch Core Changes
-- `SearchResult` now includes `dag_nodes` and `tables_used`
-- CTE-aware table extraction in all regex-based table parsers
-- Metrics extended with error taxonomy fields
+#### DeltaBackend (`benchmark/generator/backends/delta.py`)
+- `spark_session` param for Databricks cluster reuse
+- `mode="local"` bypasses Databricks Connect for local Spark
+- `CREATE CATALOG` wrapped in try/except for Unity Catalog permissions
+- Fully qualified table names in DDL (`catalog.schema.table`)
+- Databricks generation notebook: `benchmark/generator/gen_on_databricks.py`
 
-### Validation Results (dry-run, 15 questions)
+#### DatabricksExecutor (`src/syrch/executors/databricks_executor.py`)
+- `USE CATALOG` / `USE SCHEMA` before each SQL execution for short-name resolution
+- Connection params from env vars (`DATABRICKS_*`)
 
+#### OpenAILLM (`src/syrch/llm/openai_llm.py`)
+- Local model support: dummy key (`sk-no-key-required`) when `base_url` is set
+
+#### Data Generation Fixes
+| Issue | Fix | Status |
+|-------|-----|--------|
+| S5: `sale_month` had 'A','B','C' | Added 36 month values to `sales.yaml` + `replace=False` sampling + improved TEXT fallback | ✅ |
+| S13: FK `product→category` 0% match | FK resolution via `fk_registry` + topological sort (Kahn's algorithm) | ✅ |
+
+### Validation Results
+
+#### SQLite dry-run (15 questions)
 ```
 Retriever: Avg Recall 1.000, Avg Precision 1.000
 Planner:   Minimal DAG 13/15 (dry-run limitation)
 SQL:       Execution 15/15, Result Match 15/15
-Errors:    2 planner_error (dry-run: CTE-based SQL can't infer multi-node DAG)
 ```
 
-### Known Data Issues
+#### Databricks live run (qwen3.5-4b-4bit, 15 questions)
+```
+Retriever: Avg Recall ~0.70, Avg Precision ~0.57
+SQL:       Execution 15/15, Result Match 0/15 (GT CSV not available on Databricks)
+Avg Confidence: ~0.65
+Avg Duration: ~185s/q
+```
 
-| Issue | Impact | Root Cause |
-|-------|--------|------------|
-| S5: `sale_month` has 'A','B','C' instead of date strings | Ground truth SQL `LIKE '2024%'` returns 0 rows | `mart_sales_monthly.sale_month` is TEXT without distribution params |
-| S13: FK chain `product→category` 0% match | Category revenue query returns 0 rows | Data generation order issue in quality injection |
+### Known Issues
+
+| Category | Issue | Impact |
+|----------|-------|--------|
+| Ground Truth | GT CSV not on Databricks → `result_match` always False | Fixed via `gt_dir` param |
+| Retriever | Model selects wrong tables (e.g. `mart_sales_daily` instead of `dw_sales_order` for revenue) | Needs better schema descriptions |
+| Time Range | Model uses `<= '2024-12-31'` vs ground truth `< '2025-01-01'` | Creates false `wrong_time` errors |
+| Planner | D&C over-decomposition (8 nodes for simple query) | Needs `max_depth` tuning or node merging |
+| SCD | SCD2 join (`valid_from`/`valid_to`) not detected | Missing from training/system prompt |
 
 ---
 
 ## Next Steps (Planned Phases)
 
-### Phase 2 — Schema & Question Expansion
+### Phase 2 — Schema & Question Expansion (In Progress)
 
-**Goal**: Scale from 31→~90 tables, 15→120 questions
+**Goal**: Scale from 35→~90 tables, 15→120 questions
 
 1. **Schema expansion**
    - Finance domain (`schema/finance.yaml`)
@@ -76,33 +102,39 @@ Errors:    2 planner_error (dry-run: CTE-based SQL can't infer multi-node DAG)
    - New groups: cross-domain, temporal, semantic, ambiguous
    - Each question in easy→medium→hard→very-hard progression
 
-3. **Fix known data issues**
-   - `mart_sales_monthly.sale_month` distribution → generate proper month strings
-   - Fix FK generation order for `product→category` chain
-
-4. **Generate medium/enterprise databases**
+3. **Generate medium/enterprise databases**
    - `benchmark_medium.sqlite` (3M rows)
    - `benchmark_enterprise.sqlite` (10M rows)
 
-### Phase 3 — CI & Automation
+### Phase 3 — Databricks Validation (Next)
+
+1. **Ground truth generation on Databricks**
+   - Script to execute `ground_truth_sql` against Databricks SQL Warehouse
+   - Save CSVs to DBFS/Volumes for `gt_dir` consumption
+
+2. **Cross-backend consistency**
+   - SQLite result == Delta result (same seed)
+   - Validation run against both backends
+
+3. **Benchmark report automation**
+   - Per-model comparison: qwen3.5 vs gpt-4o vs claude
+   - JSON export with full error taxonomy breakdown
+
+### Phase 4 — CI & Report System
 
 1. **GitHub Actions workflow** (`.github/workflows/benchmark.yml`)
-   - On PR: generate `benchmark_small.sqlite`, run `run_benchmark.py --quick`
+   - On PR: generate DB, run `run_benchmark.py --quick`
    - Output results to GitHub Summary
    - Regression detection vs previous run
 
-2. **Report system**
-   - Markdown/JSON export with escalation group breakdown
-   - Per-model comparison (`qwen3.5-4b-4bit` vs `gpt-4o` vs `claude-3-opus`)
+2. **Model quality improvements**
+   - Improved planner system prompt for better table selection
+   - Few-shot examples for time range boundary handling
+   - SCD2 join detection
+   - D&C decomposition depth limits
 
 3. **Hyperparameter grid** (`search/grid.py` integration)
    - Cross-product runs: model × max_depth × max_attempts × calibration
-
-### Phase 4 — Databricks Validation
-
-1. **Delta DB generation** via `databricks-enterprise` profile
-2. **Cross-backend consistency**: SQLite result == Delta result (same seed)
-3. **Databricks executor benchmark**: `syrch.query(executor_type="databricks-sql")`
 
 ---
 
@@ -119,19 +151,57 @@ Follows `AGENTS.md` convention:
 
 ## Usage
 
+### Local (SQLite)
 ```bash
 # Ground truth generation
 python benchmark/evaluator/generate_ground_truth.py --profile small
 
-# Dry-run evaluation (no LLM needed)
+# Dry-run evaluation
 python benchmark/evaluator/run_benchmark.py --profile small --questions pilot --dry-run
 
 # Full evaluation (requires API key)
-python benchmark/evaluator/run_benchmark.py --profile small --model gpt-4o
+python benchmark/evaluator/run_benchmark.py --profile small --model gpt-4o --api-key $OPENAI_API_KEY
 
 # Quick check (L1-L2 only)
 python benchmark/evaluator/run_benchmark.py --quick
 
 # Export results
 python benchmark/evaluator/run_benchmark.py --dry-run --export reports/pilot.json
+```
+
+### Databricks
+```bash
+# Dry-run against Databricks SQL Warehouse
+python benchmark/evaluator/run_benchmark.py \
+    --profile databricks-enterprise \
+    --executor databricks-sql \
+    --dry-run
+
+# Full evaluation
+python benchmark/evaluator/run_benchmark.py \
+    --profile databricks-enterprise \
+    --executor databricks-sql \
+    --model qwen3.5-4b-4bit \
+    --base-url http://localhost:11434/v1
+```
+
+### From Notebook
+```python
+from benchmark.evaluator.run_benchmark import run_benchmark, print_summary
+
+results = run_benchmark(
+    profile_name="databricks-enterprise",
+    executor_type="databricks-sql",
+    dry_run=True,
+    gt_dir="/Workspace/Users/me/benchmark/generated/answers/pilot",
+)
+print_summary(results)
+```
+
+### Delta Table Generation
+```bash
+# Local Spark (pyspark + delta-spark required)
+python benchmark/generator/gen_business_db.py --profile databricks-enterprise --backend delta
+
+# Databricks notebook: upload benchmark/generator/gen_on_databricks.py and run
 ```
