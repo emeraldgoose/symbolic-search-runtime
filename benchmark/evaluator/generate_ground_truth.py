@@ -167,7 +167,11 @@ def generate_ground_truth(
     try:
         for q in questions:
             qid = q["id"]
-            gt_sql = q.get("ground_truth_sql", "")
+            # Prefer executor-specific SQL when available
+            if executor_type in ("spark", "databricks-sql"):
+                gt_sql = q.get("ground_truth_sql_spark") or q.get("ground_truth_sql", "")
+            else:
+                gt_sql = q.get("ground_truth_sql", "")
             if not gt_sql:
                 print(f"  SKIP  {qid}: no ground_truth_sql")
                 continue

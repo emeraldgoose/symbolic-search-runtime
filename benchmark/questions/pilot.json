@@ -119,7 +119,8 @@
     "expected_sql_patterns": ["AVG", "paid_at", "shipped_at"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["direct_query"],
-    "ground_truth_sql": "SELECT AVG(julianday(shipped_at) - julianday(paid_at)) AS avg_fulfillment_days FROM dw_sales_order WHERE paid_at IS NOT NULL AND shipped_at IS NOT NULL"
+    "ground_truth_sql": "SELECT AVG(julianday(shipped_at) - julianday(paid_at)) AS avg_fulfillment_days FROM dw_sales_order WHERE paid_at IS NOT NULL AND shipped_at IS NOT NULL",
+    "ground_truth_sql_spark": "SELECT AVG(DATEDIFF(shipped_at, paid_at)) AS avg_fulfillment_days FROM dw_sales_order WHERE paid_at IS NOT NULL AND shipped_at IS NOT NULL"
   },
   {
     "id": "S7",
@@ -186,7 +187,8 @@
     "expected_sql_patterns": ["ROW_NUMBER", "LAG", "MIN", "GROUP BY"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["window_function", "cte_window", "self_join"],
-    "ground_truth_sql": "WITH first_purchase AS (SELECT customer_id, MIN(order_date) AS first_order_date FROM dw_sales_order WHERE status = 'completed' GROUP BY customer_id), second_purchase AS (SELECT DISTINCT o.customer_id FROM dw_sales_order o JOIN first_purchase f ON o.customer_id = f.customer_id WHERE o.status = 'completed' AND o.order_date > f.first_order_date AND julianday(o.order_date) - julianday(f.first_order_date) <= 30) SELECT ROUND(CAST(COUNT(DISTINCT s.customer_id) AS REAL) / NULLIF(COUNT(DISTINCT f.customer_id), 0) * 100, 2) AS repeat_purchase_rate FROM first_purchase f LEFT JOIN second_purchase s ON f.customer_id = s.customer_id"
+    "ground_truth_sql": "WITH first_purchase AS (SELECT customer_id, MIN(order_date) AS first_order_date FROM dw_sales_order WHERE status = 'completed' GROUP BY customer_id), second_purchase AS (SELECT DISTINCT o.customer_id FROM dw_sales_order o JOIN first_purchase f ON o.customer_id = f.customer_id WHERE o.status = 'completed' AND o.order_date > f.first_order_date AND julianday(o.order_date) - julianday(f.first_order_date) <= 30) SELECT ROUND(CAST(COUNT(DISTINCT s.customer_id) AS REAL) / NULLIF(COUNT(DISTINCT f.customer_id), 0) * 100, 2) AS repeat_purchase_rate FROM first_purchase f LEFT JOIN second_purchase s ON f.customer_id = s.customer_id",
+    "ground_truth_sql_spark": "WITH first_purchase AS (SELECT customer_id, MIN(order_date) AS first_order_date FROM dw_sales_order WHERE status = 'completed' GROUP BY customer_id), second_purchase AS (SELECT DISTINCT o.customer_id FROM dw_sales_order o JOIN first_purchase f ON o.customer_id = f.customer_id WHERE o.status = 'completed' AND o.order_date > f.first_order_date AND DATEDIFF(o.order_date, f.first_order_date) <= 30) SELECT ROUND(CAST(COUNT(DISTINCT s.customer_id) AS REAL) / NULLIF(COUNT(DISTINCT f.customer_id), 0) * 100, 2) AS repeat_purchase_rate FROM first_purchase f LEFT JOIN second_purchase s ON f.customer_id = s.customer_id"
   },
   {
     "id": "S10",
@@ -205,7 +207,8 @@
     "expected_sql_patterns": ["LAG", "window"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["window_function", "self_join"],
-    "ground_truth_sql": "WITH monthly AS (SELECT strftime('%Y-%m', sale_date) AS month, SUM(total_revenue) AS revenue, SUM(total_items_sold) AS items_sold FROM mart_sales_daily WHERE is_complete = 1 GROUP BY strftime('%Y-%m', sale_date)) SELECT month, items_sold, LAG(items_sold) OVER (ORDER BY month) AS prev_items_sold, items_sold - LAG(items_sold) OVER (ORDER BY month) AS difference FROM monthly ORDER BY month DESC LIMIT 2"
+    "ground_truth_sql": "WITH monthly AS (SELECT strftime('%Y-%m', sale_date) AS month, SUM(total_revenue) AS revenue, SUM(total_items_sold) AS items_sold FROM mart_sales_daily WHERE is_complete = 1 GROUP BY strftime('%Y-%m', sale_date)) SELECT month, items_sold, LAG(items_sold) OVER (ORDER BY month) AS prev_items_sold, items_sold - LAG(items_sold) OVER (ORDER BY month) AS difference FROM monthly ORDER BY month DESC LIMIT 2",
+    "ground_truth_sql_spark": "WITH monthly AS (SELECT DATE_FORMAT(sale_date, 'yyyy-MM') AS month, SUM(total_revenue) AS revenue, SUM(total_items_sold) AS items_sold FROM mart_sales_daily WHERE is_complete GROUP BY DATE_FORMAT(sale_date, 'yyyy-MM')) SELECT month, items_sold, LAG(items_sold) OVER (ORDER BY month) AS prev_items_sold, items_sold - LAG(items_sold) OVER (ORDER BY month) AS difference FROM monthly ORDER BY month DESC LIMIT 2"
   },
   {
     "id": "S11",
@@ -230,7 +233,8 @@
     "expected_sql_patterns": ["GROUP BY", "MAX", "DATE"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["dag_churn", "cte_churn"],
-    "ground_truth_sql": "WITH last_order AS (SELECT customer_id, MAX(order_date) AS last_order_date FROM dw_sales_order GROUP BY customer_id), churn_risk AS (SELECT c.segment, COUNT(*) AS total_customers, SUM(CASE WHEN julianday('2024-12-31') - julianday(l.last_order_date) > 180 THEN 1 ELSE 0 END) AS churned_customers FROM dw_customer c LEFT JOIN last_order l ON c.customer_id = l.customer_id WHERE c.is_current = 1 GROUP BY c.segment) SELECT segment, ROUND(CAST(churned_customers AS REAL) / total_customers * 100, 2) AS churn_rate FROM churn_risk ORDER BY churn_rate DESC"
+    "ground_truth_sql": "WITH last_order AS (SELECT customer_id, MAX(order_date) AS last_order_date FROM dw_sales_order GROUP BY customer_id), churn_risk AS (SELECT c.segment, COUNT(*) AS total_customers, SUM(CASE WHEN julianday('2024-12-31') - julianday(l.last_order_date) > 180 THEN 1 ELSE 0 END) AS churned_customers FROM dw_customer c LEFT JOIN last_order l ON c.customer_id = l.customer_id WHERE c.is_current = 1 GROUP BY c.segment) SELECT segment, ROUND(CAST(churned_customers AS REAL) / total_customers * 100, 2) AS churn_rate FROM churn_risk ORDER BY churn_rate DESC",
+    "ground_truth_sql_spark": "WITH last_order AS (SELECT customer_id, MAX(order_date) AS last_order_date FROM dw_sales_order GROUP BY customer_id), churn_risk AS (SELECT c.segment, COUNT(*) AS total_customers, SUM(CASE WHEN DATEDIFF(DATE'2024-12-31', l.last_order_date) > 180 THEN 1 ELSE 0 END) AS churned_customers FROM dw_customer c LEFT JOIN last_order l ON c.customer_id = l.customer_id WHERE c.is_current GROUP BY c.segment) SELECT segment, ROUND(CAST(churned_customers AS REAL) / total_customers * 100, 2) AS churn_rate FROM churn_risk ORDER BY churn_rate DESC"
   },
   {
     "id": "S12",
@@ -252,7 +256,8 @@
     "expected_sql_patterns": ["SUM", "LAG", "CASE", "strftime"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["window_function", "cte_yoy", "subquery_yoy"],
-    "ground_truth_sql": "WITH yearly AS (SELECT strftime('%Y', order_date) AS year, SUM(total_amount) AS revenue FROM dw_sales_order WHERE status NOT IN ('refunded', 'cancelled') AND order_date >= '2023-01-01' AND order_date < '2025-01-01' GROUP BY strftime('%Y', order_date)) SELECT year, revenue, LAG(revenue) OVER (ORDER BY year) AS prev_revenue, ROUND((revenue - LAG(revenue) OVER (ORDER BY year)) / LAG(revenue) OVER (ORDER BY year) * 100, 2) AS yoy_growth FROM yearly"
+    "ground_truth_sql": "WITH yearly AS (SELECT strftime('%Y', order_date) AS year, SUM(total_amount) AS revenue FROM dw_sales_order WHERE status NOT IN ('refunded', 'cancelled') AND order_date >= '2023-01-01' AND order_date < '2025-01-01' GROUP BY strftime('%Y', order_date)) SELECT year, revenue, LAG(revenue) OVER (ORDER BY year) AS prev_revenue, ROUND((revenue - LAG(revenue) OVER (ORDER BY year)) / LAG(revenue) OVER (ORDER BY year) * 100, 2) AS yoy_growth FROM yearly",
+    "ground_truth_sql_spark": "WITH yearly AS (SELECT YEAR(order_date) AS year, SUM(total_amount) AS revenue FROM dw_sales_order WHERE status NOT IN ('refunded', 'cancelled') AND order_date >= '2023-01-01' AND order_date < '2025-01-01' GROUP BY YEAR(order_date)) SELECT year, revenue, LAG(revenue) OVER (ORDER BY year) AS prev_revenue, ROUND((revenue - LAG(revenue) OVER (ORDER BY year)) / LAG(revenue) OVER (ORDER BY year) * 100, 2) AS yoy_growth FROM yearly"
   },
   {
     "id": "S13",
@@ -315,6 +320,7 @@
     "expected_sql_patterns": ["AVG", "JOIN", "is_holiday"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["join_filter", "subquery_filter"],
-    "ground_truth_sql": "SELECT AVG(d.total_revenue) AS avg_daily_revenue_excl_holidays FROM mart_sales_daily d JOIN dim_date dt ON d.sale_date = dt.date_key WHERE dt.year = 2024 AND dt.is_holiday = 0 AND d.is_complete = 1"
+    "ground_truth_sql": "SELECT AVG(d.total_revenue) AS avg_daily_revenue_excl_holidays FROM mart_sales_daily d JOIN dim_date dt ON d.sale_date = dt.date_key WHERE dt.year = 2024 AND dt.is_holiday = 0 AND d.is_complete = 1",
+    "ground_truth_sql_spark": "SELECT AVG(d.total_revenue) AS avg_daily_revenue_excl_holidays FROM mart_sales_daily d JOIN dim_date dt ON d.sale_date = dt.date_key WHERE dt.year = 2024 AND NOT dt.is_holiday AND d.is_complete"
   }
 ]
