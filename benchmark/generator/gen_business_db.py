@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+import pandas as pd
 import yaml
 
 from benchmark.generator.backends.base import Backend
@@ -113,6 +114,39 @@ def generate(profile_name: str, backends: list[str] | None = None, verify: bool 
             logger.error("No backends configured for profile '%s'", profile_name)
             sys.exit(1)
 
+        # Topological sort by FK dependencies
+        table_map = {t.name: t for t in all_tables}
+        dep_graph: dict[str, set[str]] = {t.name: set() for t in all_tables}
+        for t in all_tables:
+            for c in t.columns:
+                if c.fk:
+                    ref_table = c.fk.split(".")[0]
+                    if ref_table in dep_graph and ref_table != t.name:
+                        dep_graph[t.name].add(ref_table)
+
+        in_degree = {name: len(deps) for name, deps in dep_graph.items()}
+        queue = [name for name, deg in in_degree.items() if deg == 0]
+        sorted_names: list[str] = []
+        while queue:
+            name = queue.pop(0)
+            sorted_names.append(name)
+            for dep_name, deps in dep_graph.items():
+                if name in deps:
+                    deps.remove(name)
+                    in_degree[dep_name] -= 1
+                    if in_degree[dep_name] == 0:
+                        queue.append(dep_name)
+
+        remaining = set(dep_graph.keys()) - set(sorted_names)
+        if remaining:
+            logger.warning("Circular FK dependencies detected: %s — generating in arbitrary order", remaining)
+            sorted_names.extend(remaining)
+
+        all_tables = [table_map[name] for name in sorted_names]
+
+        # FK registry: maps table name → full DataFrame for FK resolution
+        fk_registry: dict[str, pd.DataFrame] = {}
+
         # Generate each table
         for table_def in all_tables:
             rng = get_rng(profile_name, table_def.name)
@@ -124,11 +158,16 @@ def generate(profile_name: str, backends: list[str] | None = None, verify: bool 
 
             # Generate and write data in batches
             n_rows = 0
-            for batch_df in generate_table(rng, table_def, batch_size):
+            batch_dfs: list[pd.DataFrame] = []
+            for batch_df in generate_table(rng, table_def, batch_size, fk_registry):
                 batch_df = apply_all_quality(batch_df, quality_config, rng)
                 for be in active_backends:
                     be.write_batch(table_def.name, batch_df)
+                batch_dfs.append(batch_df)
                 n_rows += len(batch_df)
+
+            # Store full DataFrame in FK registry for downstream tables
+            fk_registry[table_def.name] = pd.concat(batch_dfs, ignore_index=True)
 
             # Finalize (OPTIMIZE for Delta, ANALYZE for SQLite)
             for be in active_backends:

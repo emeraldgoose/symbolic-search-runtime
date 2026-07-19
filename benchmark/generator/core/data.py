@@ -9,15 +9,25 @@ import pandas as pd
 from benchmark.generator.core.schema import ColumnDef, TableDef
 
 
-def _generate_column(rng: np.random.Generator, col: ColumnDef, n: int) -> np.ndarray | pd.Series:
+def _generate_column(rng: np.random.Generator, col: ColumnDef, n: int,
+                     fk_registry: dict[str, pd.DataFrame] | None = None) -> np.ndarray | pd.Series:
+    if col.fk is not None and fk_registry is not None:
+        ref_table, ref_col = col.fk.split(".", 1)
+        if ref_table in fk_registry and ref_col in fk_registry[ref_table].columns:
+            valid = fk_registry[ref_table][ref_col].dropna().unique()
+            if len(valid) > 0:
+                return rng.choice(valid, size=n).astype(valid.dtype)
+
     if col.values is not None:
         probs = col.dist_params.get("probs", None)
         if isinstance(probs, list) and len(probs) == len(col.values):
             p = np.array(probs, dtype=float)
             p /= p.sum()
+            replace = True
         else:
             p = None
-        return pd.Categorical(rng.choice(col.values, size=n, p=p))
+            replace = n > len(col.values)
+        return pd.Categorical(rng.choice(col.values, size=n, p=p, replace=replace))
 
     dtype = col.type.upper()
 
@@ -71,13 +81,14 @@ def _generate_column(rng: np.random.Generator, col: ColumnDef, n: int) -> np.nda
         p_true = col.dist_params.get("p_true", 0.5)
         return rng.choice([True, False], size=n, p=[p_true, 1 - p_true])
 
-    return pd.Series(rng.choice(["A", "B", "C"], size=n))
+    return pd.Series([f"v_{i:05d}" for i in range(n)])
 
 
 def generate_table(
     rng: np.random.Generator,
     table: TableDef,
     batch_size: int = 10000,
+    fk_registry: dict[str, pd.DataFrame] | None = None,
 ) -> Iterator[pd.DataFrame]:
     n = table.rows
     if batch_size <= 0:
@@ -89,7 +100,7 @@ def generate_table(
         m = end - start
         data: dict[str, Any] = {}
         for col in table.columns:
-            data[col.name] = _generate_column(rng, col, m)
+            data[col.name] = _generate_column(rng, col, m, fk_registry)
         df = pd.DataFrame(data)
         yield df
         start = end
