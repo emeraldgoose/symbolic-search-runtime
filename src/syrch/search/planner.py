@@ -223,10 +223,11 @@ class Planner:
             tables_str = "\n".join(table_lines)
         else:
             all_schemas = problem.all_schemas or [problem.schema]
-            tables_str = ""
-            for s in all_schemas:
-                cols_str = ", ".join(f"{c.name} ({c.type})" for c in s.columns)
-                tables_str += f"Table: {s.name}\n  Columns: {cols_str}\n"
+            table_lines = []
+            for tbl in all_schemas:
+                cols_str = ", ".join(f"{c.name} ({c.type})" for c in tbl.columns)
+                table_lines.append(f"Table: {tbl.name}\n  Columns: {cols_str}")
+            tables_str = "\n".join(table_lines)
         return f"""Question: {problem.question}
 
 {tables_str}

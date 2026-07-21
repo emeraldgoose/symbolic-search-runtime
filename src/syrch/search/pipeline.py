@@ -47,17 +47,17 @@ def run_pipeline(
         user_callback=user_callback if config.interactive else None,
     )
 
+    all_schemas_list: list[TableSchema] = problem.all_schemas or [problem.schema]
     problem = ProblemSpec(
         question=amended_question,
         schema=problem.schema,
-        all_schemas=problem.all_schemas,
+        all_schemas=all_schemas_list,
         scored_schemas=problem.scored_schemas,
     )
 
-    compressed = compress_schema(dag, problem.all_schemas)
+    compressed = compress_schema(dag, all_schemas_list)
 
-    all_schemas_for_replan = problem.all_schemas
-    scored_for_replan = problem.scored_schemas
+    scored_for_replan: list = problem.scored_schemas or []
 
     def _on_replan(current_dag: TaskDAG, failed_node_id: str, node_result: NodeResult) -> TaskDAG:
         new_dag = planner.replan(
@@ -66,9 +66,9 @@ def run_pipeline(
             sql=node_result.sql,
             error=node_result.error or "",
             node_result=node_result,
-            scored_schemas=scored_for_replan or [],
+            scored_schemas=scored_for_replan,
         )
-        new_compressed = compress_schema(new_dag, all_schemas_for_replan)
+        new_compressed = compress_schema(new_dag, all_schemas_list)
         scheduler.agent.set_compressed_schemas(new_compressed)
         return new_dag
 
