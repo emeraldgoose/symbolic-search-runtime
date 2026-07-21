@@ -55,7 +55,28 @@ def run_pipeline(
     )
 
     compressed = compress_schema(dag, problem.all_schemas)
-    scheduler = Scheduler(llm, executor, config, compressed_schemas=compressed)
+
+    all_schemas_for_replan = problem.all_schemas
+    scored_for_replan = problem.scored_schemas
+
+    def _on_replan(current_dag: TaskDAG, failed_node_id: str, node_result: NodeResult) -> TaskDAG:
+        new_dag = planner.replan(
+            dag=current_dag,
+            failed_node_id=failed_node_id,
+            sql=node_result.sql,
+            error=node_result.error or "",
+            node_result=node_result,
+            scored_schemas=scored_for_replan or [],
+        )
+        new_compressed = compress_schema(new_dag, all_schemas_for_replan)
+        scheduler.agent.set_compressed_schemas(new_compressed)
+        return new_dag
+
+    scheduler = Scheduler(
+        llm, executor, config,
+        compressed_schemas=compressed,
+        replan_callback=_on_replan,
+    )
     results = scheduler.run(dag)
     aggregator = Aggregator(llm, executor, config)
     solution = aggregator.merge(problem.question, dag, results)

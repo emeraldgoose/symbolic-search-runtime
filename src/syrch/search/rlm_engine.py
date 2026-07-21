@@ -177,6 +177,21 @@ class RLMAgent:
             try:
                 data = self.executor.execute(sql)
             except Exception as e:
+                error_msg = str(e).lower()
+                # Non-recoverable errors → signal replan
+                if self._is_non_recoverable(error_msg, node):
+                    result = NodeResult(
+                        node_id=node.id,
+                        data=pd.DataFrame(),
+                        sql=sql,
+                        confidence=0.0,
+                        reasoning_paths=paths,
+                        cost_tokens=total_cost,
+                        error=f"Non-recoverable: {e}",
+                        replan_request=self._build_replan_reason(error_msg, node),
+                    )
+                    result.ambiguity_score = 1.0
+                    return result
                 signals.execution_errors += 1
                 paths.append(path)
                 if best_path is None or confidence > best_path.confidence:
@@ -299,6 +314,30 @@ class RLMAgent:
                 f"Consider adding LIMIT or aggregation."
             )
         return None
+
+    def _is_non_recoverable(self, error_msg: str, node: TaskNode) -> bool:
+        """Determine if an execution error requires replanning vs simple retry."""
+        # Table not found → replan (missing table in available schemas)
+        if any(phrase in error_msg for phrase in
+               ["no such table", "table not found", "doesn't exist",
+                "table does not exist", "relation", "not found"]):
+            return True
+        # Join path impossible
+        if "ambiguous column" in error_msg:
+            return True
+        # If hint_tables are available but the error references a missing table
+        if node.hint_tables:
+            for t in node.hint_tables:
+                if t.lower() in error_msg and "not found" in error_msg:
+                    return True
+        return False
+
+    @staticmethod
+    def _build_replan_reason(error_msg: str, node: TaskNode) -> str:
+        reason = f"Execution failed for node {node.id}: {error_msg[:200]}"
+        if node.hint_tables:
+            reason += f" | hint_tables: {node.hint_tables}"
+        return reason
 
     def _extract_sql(self, content: str) -> str:
         import re

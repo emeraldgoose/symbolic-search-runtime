@@ -87,6 +87,7 @@ class NodeResult:
     cost_tokens: int = 0
     error: str | None = None
     ambiguity_score: float = 0.0
+    replan_request: str | None = None
 
 
 @dataclass

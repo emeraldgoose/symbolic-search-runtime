@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from syrch.core.models import JoinKey, ProblemSpec, TableSchema, TaskDAG, TaskNode
+import logging
+
+from syrch.core.models import JoinKey, NodeResult, ProblemSpec, TableSchema, TaskDAG, TaskNode
 from syrch.core.config import ExecutionConfig
 from syrch.llm.base import BaseLLM
+
+logger = logging.getLogger(__name__)
 
 DECOMPOSE_SYSTEM = """You are a task decomposition planner. Given a problem and a database schema, decompose it into a DAG of sub-tasks.
 
@@ -42,6 +46,27 @@ Output a JSON object with:
   ]
 }}
 """
+
+
+def compute_layers(nodes: dict[str, TaskNode]) -> list[list[str]]:
+    indeg: dict[str, int] = {}
+    for nid in nodes:
+        indeg.setdefault(nid, 0)
+        for dep in nodes[nid].depends_on:
+            indeg[nid] = indeg.get(nid, 0) + 1
+    layers: list[list[str]] = []
+    remaining = set(nodes.keys())
+    while remaining:
+        layer = [nid for nid in remaining if indeg.get(nid, 0) == 0]
+        if not layer:
+            break
+        layers.append(layer)
+        for nid in layer:
+            remaining.remove(nid)
+            for other in remaining:
+                if nid in nodes[other].depends_on:
+                    indeg[other] -= 1
+    return layers
 
 
 class Planner:
@@ -215,24 +240,7 @@ Decompose this into sub-tasks. Follow the JSON output format exactly. Each sub-t
         return list(nodes.keys())[0]
 
     def _compute_layers(self, nodes: dict[str, TaskNode]) -> list[list[str]]:
-        indeg: dict[str, int] = {}
-        for nid, node in nodes.items():
-            indeg.setdefault(nid, 0)
-            for dep in node.depends_on:
-                indeg[nid] = indeg.get(nid, 0) + 1
-        layers: list[list[str]] = []
-        remaining = set(nodes.keys())
-        while remaining:
-            layer = [nid for nid in remaining if indeg.get(nid, 0) == 0]
-            if not layer:
-                break
-            layers.append(layer)
-            for nid in layer:
-                remaining.remove(nid)
-                for other in remaining:
-                    if nid in nodes[other].depends_on:
-                        indeg[other] -= 1
-        return layers
+        return compute_layers(nodes)
 
     def _validate(self, dag: TaskDAG) -> None:
         for nid, node in dag.nodes.items():
@@ -254,3 +262,46 @@ Decompose this into sub-tasks. Follow the JSON output format exactly. Each sub-t
 
         for nid in dag.nodes:
             dfs(nid)
+
+    def replan(
+        self,
+        dag: TaskDAG,
+        failed_node_id: str,
+        sql: str,
+        error: str,
+        node_result: NodeResult,
+        scored_schemas: list,
+    ) -> TaskDAG:
+        if self.config.verbose:
+            logger.info("Planner.replan: node=%s error=%s", failed_node_id, error[:100])
+        failed_node = dag.nodes.get(failed_node_id)
+        if failed_node is None or failed_node.hint_tables:
+            new_hints = self._suggest_alternative_tables(error, failed_node, scored_schemas) if failed_node else None
+            if new_hints and failed_node:
+                if self.config.verbose:
+                    logger.info("  updating hint_tables: %s -> %s", failed_node.hint_tables, new_hints)
+                failed_node.hint_tables = new_hints
+        return dag
+
+    @staticmethod
+    def _suggest_alternative_tables(
+        error: str,
+        node: TaskNode,
+        scored_schemas: list,
+    ) -> list[str] | None:
+        error_lower = error.lower()
+        missing_table = None
+        for phrase in ["no such table", "table not found", "doesn't exist"]:
+            if phrase in error_lower:
+                import re
+                match = re.search(r"(?:table\s+)?['\"]?(\w+)['\"]?", error_lower)
+                if match:
+                    missing_table = match.group(1)
+                break
+        if missing_table and scored_schemas:
+            alternatives = [
+                s.schema.name for s in scored_schemas[:5]
+                if s.schema.name.lower() != missing_table
+            ]
+            return alternatives[:3] if alternatives else None
+        return None
