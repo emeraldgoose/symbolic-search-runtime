@@ -13,17 +13,15 @@ Rules:
 - A sub-task is atomic if a single SQL query can fully and cleanly answer it.
   Prefer decomposition when:
   * The question involves multiple analytical dimensions or drill-downs
-    (e.g., aggregate at one granularity, then break down by another)
   * Intermediate results carry independent insight
-    (e.g., yearly totals are meaningful on their own)
   * Multiple aggregation strategies, join combinations, or filtering
     approaches must be explored independently
-  Keep it atomic when the question maps directly to a single query
-  without losing clarity or completeness.
+  Keep it atomic when the question maps directly to a single query.
 - Non-atomic sub-tasks will be further decomposed recursively (up to max_depth).
-  Provide clear descriptions so recursive decomposition can proceed correctly.
 - Sub-tasks must be MECE (Mutually Exclusive, Collectively Exhaustive)
-- every sub-task must have an id, description, depends_on list, is_atomic boolean, and expected_output
+- Every sub-task must have: id, description, depends_on, is_atomic, expected_output.
+- VERY IMPORTANT: For each sub-task, specify hint_tables (the database table(s) most likely to contain the needed data). This is a list of table names. Be specific.
+- If you know which columns are needed, also specify hint_columns (optional, as a hint only — the SQL generator will verify).
 - If a sub-task depends on another and their results should be joined by column,
   specify join_keys. Each join_key has: left, left_col, right, right_col, how.
   Example: "join_keys": [{{"left": "B", "left_col": "customer_id",
@@ -37,7 +35,9 @@ Output a JSON object with:
       "description": "clear description of this sub-problem",
       "depends_on": [],
       "is_atomic": true,
-      "expected_output": "what data this sub-task produces"
+      "expected_output": "what data this sub-task produces",
+      "hint_tables": ["table_name"],
+      "hint_columns": ["column_name"]
     }}
   ]
 }}
@@ -51,11 +51,28 @@ class Planner:
 
     def decompose(self, problem: ProblemSpec) -> TaskDAG:
         dag = self._decompose_level(problem, depth=0)
-        self._recursive_expand(dag, depth=0, schemas=problem.all_schemas or [problem.schema])
+        effective_max = self._resolve_max_depth(problem)
+        self._recursive_expand(dag, depth=0, schemas=problem.all_schemas or [problem.schema],
+                               max_depth_override=effective_max)
         return dag
 
+    @staticmethod
+    def _is_simple_question(question: str) -> bool:
+        q = question.lower()
+        simple_keywords = {"show", "list", "what is", "what are", "how many", "how much",
+                           "give me", "find", "tell me", "calculate", "compute", "get"}
+        has_simple_prefix = any(q.startswith(k) for k in simple_keywords)
+        word_count = len(q.split())
+        return has_simple_prefix and word_count < 12
+
+    def _resolve_max_depth(self, problem: ProblemSpec) -> int:
+        base = self.config.max_depth
+        if self._is_simple_question(problem.question):
+            return min(base, 2)
+        return base
+
     MAX_SUBTASKS = 6
-    MAX_TOTAL_NODES = 12
+    MAX_TOTAL_NODES = 10
 
     def _decompose_level(self, problem: ProblemSpec, depth: int = 0) -> TaskDAG:
         system = DECOMPOSE_SYSTEM.format(max_depth=self.config.max_depth)
@@ -81,6 +98,11 @@ class Planner:
                         except Exception:
                             pass
 
+            hint_tables_raw = item.get("hint_tables", [])
+            hint_tables: list[str] | None = [t for t in hint_tables_raw if isinstance(t, str)] if isinstance(hint_tables_raw, list) else None
+            hint_columns_raw = item.get("hint_columns", [])
+            hint_columns: list[str] | None = [c for c in hint_columns_raw if isinstance(c, str)] if isinstance(hint_columns_raw, list) else None
+
             node = TaskNode(
                 id=node_id,
                 description=item.get("description", ""),
@@ -89,6 +111,8 @@ class Planner:
                 is_atomic=item.get("is_atomic", True),
                 expected_output_desc=item.get("expected_output", ""),
                 join_keys=join_keys,
+                hint_tables=hint_tables,
+                hint_columns=hint_columns,
             )
             nodes[node.id] = node
         if not nodes:
@@ -101,10 +125,12 @@ class Planner:
         self._validate(dag)
         return dag
 
-    def _recursive_expand(self, dag: TaskDAG, depth: int, schemas: list[TableSchema]) -> None:
+    def _recursive_expand(self, dag: TaskDAG, depth: int, schemas: list[TableSchema],
+                          max_depth_override: int | None = None) -> None:
         if not schemas:
             return
-        if depth >= self.config.max_depth - 1 or len(dag.nodes) >= self.MAX_TOTAL_NODES:
+        max_depth = max_depth_override if max_depth_override is not None else self.config.max_depth
+        if depth >= max_depth - 1 or len(dag.nodes) >= self.MAX_TOTAL_NODES:
             for node in dag.nodes.values():
                 node.is_atomic = True
             return
@@ -159,17 +185,28 @@ class Planner:
         return [nid for nid in nodes if nid not in all_dependents]
 
     def _build_user_prompt(self, problem: ProblemSpec) -> str:
-        all_schemas = problem.all_schemas or [problem.schema]
-        tables_str = ""
-        for s in all_schemas:
-            cols_str = "\n".join(f"  - {c.name}: {c.type}" for c in s.columns)
-            tables_str += f"Table: {s.name}\nColumns:\n{cols_str}\n\n"
-        return f"""Database tables:
-{tables_str.strip()}
+        scored = problem.scored_schemas
+        if scored:
+            table_lines: list[str] = []
+            for s in scored:
+                cols_str = ", ".join(f"{c.name}({c.type})" for c in s.schema.columns)
+                reason_str = "; ".join(s.match_reasons[:2])
+                table_lines.append(
+                    f"Table: {s.schema.name}  score={s.score:.2f}  [{reason_str}]\n"
+                    f"  Columns: {cols_str}"
+                )
+            tables_str = "\n".join(table_lines)
+        else:
+            all_schemas = problem.all_schemas or [problem.schema]
+            tables_str = ""
+            for s in all_schemas:
+                cols_str = ", ".join(f"{c.name} ({c.type})" for c in s.columns)
+                tables_str += f"Table: {s.name}\n  Columns: {cols_str}\n"
+        return f"""Question: {problem.question}
 
-Question: {problem.question}
+{tables_str}
 
-Decompose this into sub-tasks."""
+Decompose this into sub-tasks. Follow the JSON output format exactly. Each sub-task MUST include hint_tables."""
 
     def _resolve_root(self, nodes: dict[str, TaskNode]) -> str:
         for nid, node in nodes.items():

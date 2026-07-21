@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from syrch.core.config import ExecutionConfig
-from syrch.core.models import FinalSolution, NodeResult, ProblemSpec, TaskDAG
+from syrch.core.models import FinalSolution, NodeResult, ProblemSpec, TableSchema, TaskDAG
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.aggregator import Aggregator
@@ -11,6 +11,16 @@ from syrch.search.clarify import run_clarification
 from syrch.search.planner import Planner
 from syrch.search.retriever import Retriever
 from syrch.search.scheduler import Scheduler
+
+
+def compress_schema(dag: TaskDAG, all_schemas: list[TableSchema]) -> list[TableSchema]:
+    hinted_names: set[str] = set()
+    for node in dag.nodes.values():
+        if node.hint_tables:
+            hinted_names.update(node.hint_tables)
+    if not hinted_names:
+        return all_schemas
+    return [s for s in all_schemas if s.name in hinted_names]
 
 
 def run_pipeline(
@@ -44,7 +54,8 @@ def run_pipeline(
         scored_schemas=problem.scored_schemas,
     )
 
-    scheduler = Scheduler(llm, executor, config)
+    compressed = compress_schema(dag, problem.all_schemas)
+    scheduler = Scheduler(llm, executor, config, compressed_schemas=compressed)
     results = scheduler.run(dag)
     aggregator = Aggregator(llm, executor, config)
     solution = aggregator.merge(problem.question, dag, results)

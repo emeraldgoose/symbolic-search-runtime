@@ -54,6 +54,8 @@ class TaskNode:
     expected_output_desc: str = ""
     join_type: str = "all_of"
     join_keys: list[JoinKey] | None = None
+    hint_tables: list[str] | None = None
+    hint_columns: list[str] | None = None
     _children: list[str] | None = None
 
     def __hash__(self) -> int:

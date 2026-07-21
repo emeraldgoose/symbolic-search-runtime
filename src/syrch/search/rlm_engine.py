@@ -11,7 +11,7 @@ from syrch.search.clarify import compute_ambiguity_score
 
 RLM_SYSTEM = """You are a search agent working inside a SQL query environment.
 You have access to:
-- A database with the following schema:
+- A database with the following tables:
 {schema}
 - The executor to run SQL queries
 - Previous sub-task results as variables (e.g., result_A, result_B, etc.)
@@ -19,6 +19,7 @@ You have access to:
 Your task:
 {task_description}
 
+{hint_section}
 For each attempt, produce a SQL query that:
 1. Constructs a SQL query addressing the task
 2. Stores the result in a variable
@@ -39,10 +40,20 @@ class RLMAgent:
         self.llm = llm
         self.executor = executor
         self.config = config
+        self._compressed_schemas: list | None = None
+
+    def set_compressed_schemas(self, schemas: list | None) -> None:
+        self._compressed_schemas = schemas
 
     def _build_schema_str(self) -> str:
+        if self._compressed_schemas is not None:
+            parts: list[str] = []
+            for s in self._compressed_schemas:
+                cols = ", ".join(f"{c.name} ({c.type})" for c in s.columns)
+                parts.append(f"Table: {s.name}\nColumns: {cols}")
+            return "\n\n".join(parts) if parts else "No tables available."
         tables = self.executor.list_tables()
-        parts: list[str] = []
+        parts = []
         for t in tables:
             schema = self.executor.get_schema(t)
             cols = ", ".join(f"{c.name} ({c.type})" for c in schema.columns)
@@ -50,12 +61,29 @@ class RLMAgent:
         return "\n\n".join(parts)
 
     def _build_valid_columns(self) -> set[str]:
-        cols: set[str] = set()
+        if self._compressed_schemas is not None:
+            cols: set[str] = set()
+            for s in self._compressed_schemas:
+                cols.update(c.name.lower() for c in s.columns)
+            cols.add("*")
+            return cols
+        cols = set()
         for t in self.executor.list_tables():
             schema = self.executor.get_schema(t)
             cols.update(c.name.lower() for c in schema.columns)
         cols.add("*")
         return cols
+
+    @staticmethod
+    def _build_hint_section(node: TaskNode) -> str:
+        parts: list[str] = []
+        if node.hint_tables:
+            parts.append("Recommended tables (strongly prefer these): " + ", ".join(node.hint_tables))
+        if node.hint_columns:
+            parts.append("Planner hint — columns you may need (verify actual names): " + ", ".join(node.hint_columns))
+        if parts:
+            return "\n".join(parts) + "\n"
+        return ""
 
     def solve(
         self,
@@ -68,6 +96,7 @@ class RLMAgent:
         signals = ExecutionSignals(max_attempts=self.config.max_attempts_per_node)
 
         schema_str = self._build_schema_str()
+        hint_section = self._build_hint_section(node)
 
         context_vars = ""
         if context:
@@ -79,6 +108,7 @@ class RLMAgent:
         system = RLM_SYSTEM.format(
             schema=schema_str,
             task_description=node.description,
+            hint_section=hint_section,
         )
         user_prompt = (
             f"Task: {node.description}\n"

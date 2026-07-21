@@ -20,11 +20,14 @@ class Scheduler:
         executor: BaseExecutor,
         config: ExecutionConfig,
         agent: RLMAgent | None = None,
+        compressed_schemas: list | None = None,
     ):
         self.llm = llm
         self.executor = executor
         self.config = config
         self.agent = agent or RLMAgent(llm, executor, config)
+        if compressed_schemas is not None:
+            self.agent.set_compressed_schemas(compressed_schemas)
         max_expected = config.llm.timeout_seconds * config.max_attempts_per_node
         self.node_timeout = max(max_expected * 2, 300)
 
