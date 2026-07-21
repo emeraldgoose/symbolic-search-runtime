@@ -14,7 +14,7 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **RLM (Recursive Language Model)**: 각 하위 문제는 자체 REPL 루프에서 실행됩니다 — 코드 생성 → 구문 검증 → 스키마 검증 → SQL 실행 → 품질 검사 → 신뢰도 평가 → 개선 또는 중단. 노드당 여러 추론 경로를 탐색합니다.
 - **신뢰도 보정(Confidence Calibration)**: LLM이 스스로 평가한 신뢰도를 실행 신호(재시도, 오류, 빈 결과)로 할인하여 더 신뢰할 수 있는 점수를 산출합니다.
 - **격자 탐색(Grid Search)**: 하이퍼파라미터(`max_depth`, `high_confidence`, `max_attempts`, `calibration_enabled`)를 체계적으로 테스트하여 최적 설정을 찾습니다.
-- **다중 테이블 스키마**: Planner와 RLM이 모든 데이터베이스 테이블을 참조할 수 있습니다.
+- **다중 테이블 스키마**: Retriever가 모든 테이블을 관련성별로 점수화하고, Planner가 sub-task별로 테이블을 선택하며, RLM은 압축된 스키마(2-5개 테이블, 전체 31개 아님)만 참조합니다.
 - **실행이 아닌 추론에 대한 탐색**: D&C는 *문제 공간*을 분할하며, SQL을 분할하지 않습니다. 각 하위 문제는 완전한 추론 단위입니다 (생각 → 코드 → 검증 → 실행 → 평가).
 - **플러그형 Executor**: 추상 `BaseExecutor`에 SQLite, JDBC, Databricks 구현 — PEP 249 호환.
 
@@ -24,32 +24,52 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 User Question
     │
     ▼
-┌──────────────────┐
-│    Planner       │  ← LLM이 질문을 sub-task DAG로 분해
-│  (D&C)           │     (depends_on, is_atomic, expected_output)
-│                  │     다중 테이블 스키마: 모든 테이블 가시
-└──────┬───────────┘
-       │ TaskDAG (topo_layers)
-       ▼
-┌──────────────────┐
-│    Scheduler     │  ← 레이어별 DAG 실행
-│                   │
-│  각 노드:         │
-│  ┌─────────────┐  │
-│  │ RLM Agent    │  │  ← 5단계 검증 루프:
-│  │ 1. SQLGlot   │  │     1. 구문 검사 (sqlglot.parse_one)
-│  │    구문 검사  │  │     2. 스키마 AST 검사 (유효 컬럼)
-│  │ 2. Schema    │  │     3. SQL 실행
-│  │    AST 검사   │  │     4. 품질 검사 (행 수, null)
-│  │ 3. 실행       │  │     5. 신뢰도 보정 적용
-│  │ 4. 품질 검사  │  │
-│  │ 5. 보정       │  │
-│  └─────────────┘  │
-│                   │
-│  가지치기:         │
+┌──────────────────────┐
+│    Retriever         │  ← 키워드 매칭으로 전체 테이블 점수화
+│  (keyword match)     │     scored_schemas 출력 (고정 K 없음)
+│  + match_reason      │
+└─────────┬────────────┘
+          │ scored_schemas (점수 + 사유)
+          ▼
+┌──────────────────────┐
+│  Schema-aware        │  ← LLM 분해 + 테이블 선택
+│  Planner (D&C)       │     hint_tables: 강한 제약
+│                      │     hint_columns: 소프트 힌트 (검증)
+│                      │     L1 깊이 자동 제한 (최대 2)
+└─────────┬────────────┘
+          │ DAG + sub-task별 힌트
+          ▼
+┌──────────────────────┐
+│  Semantic Clarifier  │  ← 실행 전 모호성 감지
+│  (Question + DAG)    │     Planner 출력 활용
+│  interactive only    │
+└─────────┬────────────┘
+          │ (or skip if clear)
+          ▼
+┌──────────────────────┐
+│  Schema Compression  │  ← hint_tables 스키마만 추출
+│                      │     RLM은 2-5개 테이블만 참조 (전체 31 아님)
+└─────────┬────────────┘
+          │ 압축된 스키마
+          ▼
+┌──────────────────────┐
+│    Scheduler         │  ← 레이어별 DAG 실행
+│                      │     복구 가능 오류 → RLM 재시도
+│  각 노드:            │     구조적 오류 → Planner.replan()
+│  ┌──────────────┐   │
+│  │ RLM Agent    │   │  ← 5단계 검증 루프:
+│  │ 1. 구문 검사  │   │     1. SQLGlot 구문 검사
+│  │ 2. 스키마 검사│   │     2. 스키마 AST 검사
+│  │ 3. 실행       │   │     3. SQL 실행
+│  │ 4. 품질 검사  │   │     4. 품질 검사
+│  │ 5. 보정       │   │     5. 신뢰도 보정
+│  └──────────────┘   │
+│                     │
+│  replan_request ────→ Planner.replan(dag, node, error, trace)
+│                     │   → DAG 업데이트 → 재압축 → 계속
+│  가지치기:           │
 │  conf ≥ 임계값 → 즉시 중단
-│  최대 시도 도달 → 최고 경로 선택
-└──────┬───────────┘
+└──────┬───────────────┘
        │ NodeResults (DataFrames + SQL + confidence)
        ▼
 ┌──────────────────┐
@@ -60,25 +80,7 @@ User Question
        ▼
  Optimal Answer + SQL + Reasoning Trace
 
- ═══════ 선택사항: RLM Clarification ═══════
-       │
-       ▼ (if --interactive)
-┌──────────────────┐
-│  RLM Clarifier   │  ← RLM 소진 감지
-│                   │     ambiguity score >= 임계값
-│  노드 레벨:       │     → 사용자 질문
-│  ┌─────────────┐  │     → ProblemSpec 개선
-│  │ no_sql       │  │     → 파이프라인 재실행
-│  │ empty_result │  │
-│  │ quality_fail │  │
-│  │ low_confidence│  │
-│  └─────────────┘  │
-└──────┬───────────┘
-       │ Clarification answer → refined problem
-       ▼
-    Back to Planner
-
- ═══════ 선택사항: Grid Search ═══════
+ ═══════ Grid Search ═══════
        │
        ▼
 ┌──────────────────┐
@@ -123,7 +125,6 @@ syrch/
 ├── PLAN.md
 ├── LICENSE
 ├── .gitignore
-├── benchmarks/example.jsonl
 ├── src/syrch/
 │   ├── __init__.py               # Public API: query, SearchResult
 │   ├── api.py                    # query() 고수준 함수
@@ -151,6 +152,7 @@ syrch/
 │   │   └── cache.py              # CachedLLM + CentralCache
 │   ├── search/
 │   │   ├── __init__.py
+│   │   ├── retriever.py          # 키워드 매칭 Retriever
 │   │   ├── planner.py            # D&C: NL -> TaskDAG
 │   │   ├── scheduler.py          # DAG 실행 엔진
 │   │   ├── rlm_engine.py         # RLM REPL 루프
