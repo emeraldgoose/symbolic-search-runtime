@@ -1,0 +1,89 @@
+tables:
+  fact_event_log:
+    layer: fact
+    grain: event
+    comment: "User event log with session tracking. 15 event types. Use for funnel analysis."
+    distribution:
+      rows: 500000
+    cluster_by: [event_date, session_id]
+    columns:
+      event_id: { type: INTEGER, nullable: false, pk: true }
+      session_id: { type: TEXT, nullable: false }
+      customer_id: { type: INTEGER, nullable: true, fk: dw_customer.customer_id }
+      event_type: { type: TEXT, nullable: false,
+        values: ["page_view","search","product_view","cart_add","cart_remove","cart_view",
+                 "checkout_start","purchase_complete","refund_request","login","logout",
+                 "review_submit","wishlist_add","promotion_click","error_page"],
+        dist_params: { probs: [0.35, 0.08, 0.12, 0.06, 0.03, 0.02, 0.04, 0.025, 0.003,
+                               0.10, 0.08, 0.01, 0.015, 0.01, 0.007] }
+      }
+      event_timestamp: { type: DATETIME, nullable: false }
+      traffic_source: { type: TEXT, nullable: true,
+        values: ["organic","paid","referral","email","social","direct",null],
+        dist_params: { probs: [0.35, 0.20, 0.10, 0.10, 0.10, 0.13, 0.02] }
+      }
+      platform: { type: TEXT, nullable: false, values: ["web","ios","android"], dist_params: { probs: [0.50, 0.30, 0.20] } }
+      device_id: { type: TEXT, nullable: true }
+      referrer: { type: TEXT, nullable: true }
+      country: { type: TEXT, nullable: true, values: ["US","KR","JP","GB","DE","FR",null], dist_params: { probs: [0.40, 0.15, 0.10, 0.08, 0.07, 0.05, 0.15] } }
+      product_id: { type: INTEGER, nullable: true, fk: dw_product.product_id }
+      order_id: { type: INTEGER, nullable: true, fk: dw_sales_order.order_id }
+      campaign_id: { type: INTEGER, nullable: true, fk: dim_campaign.campaign_id }
+      event_date: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  fact_campaign_impressions:
+    layer: fact
+    grain: campaign_daily
+    comment: "Campaign impression and spend data at daily grain."
+    distribution:
+      rows: 10000
+    cluster_by: [campaign_id, impression_date]
+    columns:
+      impression_id: { type: INTEGER, nullable: false, pk: true }
+      campaign_id: { type: INTEGER, nullable: false, fk: dim_campaign.campaign_id }
+      channel_id: { type: INTEGER, nullable: false, fk: dim_channel.channel_id }
+      impression_date: { type: DATE, nullable: false }
+      impressions: { type: INTEGER, nullable: false, distribution: normal, dist_params: { mean: 5000, std: 2000 } }
+      clicks: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.0, min: 1, max: 1000 } }
+      spend: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 6.0, sigma: 1.0 } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  fact_campaign_clicks:
+    layer: fact
+    grain: click
+    comment: "Individual campaign click events."
+    distribution:
+      rows: 100000
+    columns:
+      click_id: { type: INTEGER, nullable: false, pk: true }
+      campaign_id: { type: INTEGER, nullable: false, fk: dim_campaign.campaign_id }
+      customer_id: { type: INTEGER, nullable: true, fk: dw_customer.customer_id }
+      click_timestamp: { type: DATETIME, nullable: false }
+      converted: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.03 } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  dim_campaign:
+    layer: dim
+    grain: campaign
+    comment: "Marketing campaign dimension."
+    distribution:
+      rows: 200
+    columns:
+      campaign_id: { type: INTEGER, nullable: false, pk: true }
+      campaign_name: { type: TEXT, nullable: false }
+      campaign_type: { type: TEXT, nullable: false, values: ["email","social","search","display","affiliate"] }
+      start_date: { type: DATE, nullable: false }
+      end_date: { type: DATE, nullable: true }
+      budget: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 8.0, sigma: 1.5 } }
+
+  dim_channel:
+    layer: dim
+    grain: channel
+    comment: "Marketing channel dimension."
+    distribution:
+      rows: 15
+    columns:
+      channel_id: { type: INTEGER, nullable: false, pk: true }
+      channel_name: { type: TEXT, nullable: false }
+      channel_type: { type: TEXT, nullable: false, values: ["paid","organic","social","email","referral"] }

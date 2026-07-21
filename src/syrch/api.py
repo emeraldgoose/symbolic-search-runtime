@@ -25,6 +25,8 @@ class SearchResult:
     token_cost: int
     data: pd.DataFrame | None = None
     tree: list[NodeResult] = field(default_factory=list, repr=False)
+    dag_nodes: list[dict] = field(default_factory=list, repr=False)
+    tables_used: list[str] = field(default_factory=list, repr=False)
 
 
 def _create_llm(config: LLMConfig) -> BaseLLM:
@@ -111,6 +113,8 @@ def query(
     finally:
         executor.close()
 
+    tables_used = _extract_tables_from_tree(solution.tree)
+
     return SearchResult(
         answer=solution.answer,
         sql=solution.sql,
@@ -118,4 +122,66 @@ def query(
         token_cost=solution.token_cost,
         data=solution.data,
         tree=solution.tree,
+        dag_nodes=_dag_to_dict(dag),
+        tables_used=tables_used,
     )
+
+
+def _extract_cte_names(sql: str) -> set[str]:
+    import re
+    names: set[str] = set()
+    idx = sql.upper().find("WITH ")
+    if idx < 0:
+        return names
+    remainder = sql[idx + 5:]
+    pos = 0
+    while pos < len(remainder):
+        remainder = remainder[pos:].lstrip()
+        m = re.match(r'(\w+)\s+AS\s*\(', remainder)
+        if not m:
+            break
+        names.add(m.group(1))
+        depth = 1
+        i = m.end()
+        while i < len(remainder) and depth > 0:
+            if remainder[i] == '(':
+                depth += 1
+            elif remainder[i] == ')':
+                depth -= 1
+            i += 1
+        pos = i
+        if pos < len(remainder) and remainder[pos] == ',':
+            pos += 1
+        else:
+            break
+    return names
+
+
+def _extract_tables_from_tree(tree: list[NodeResult]) -> list[str]:
+    import re
+    tables: set[str] = set()
+    pattern = re.compile(r'\b(?:FROM|JOIN)\s+(\w+)', re.IGNORECASE)
+    cte_names: set[str] = set()
+    for node in tree:
+        if node.sql:
+            cte_names |= _extract_cte_names(node.sql)
+    for node in tree:
+        if node.sql:
+            for match in pattern.finditer(node.sql):
+                tbl = match.group(1)
+                if tbl not in cte_names:
+                    tables.add(tbl)
+    return sorted(tables)
+
+
+def _dag_to_dict(dag: Any) -> list[dict]:
+    nodes = []
+    for nid, node in dag.nodes.items():
+        nodes.append({
+            "id": node.id,
+            "description": node.description,
+            "depends_on": node.depends_on,
+            "depth": node.depth,
+            "is_atomic": node.is_atomic,
+        })
+    return nodes

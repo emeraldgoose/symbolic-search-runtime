@@ -33,6 +33,8 @@ class OpenAILLM(BaseLLM):
     def __init__(self, model: str = "gpt-4o", api_key: str | None = None, base_url: str | None = None):
         self.model = model
         api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key and base_url:
+            api_key = "sk-no-key-required"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     def generate(self, system: str, user: str, **kwargs) -> LLMResponse:

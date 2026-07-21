@@ -1,0 +1,25 @@
+tables:
+  semantic_metrics:
+    layer: metadata
+    comment: "Business metric definitions. Maps business terms to SQL expressions."
+    distribution:
+      rows: 20
+    columns:
+      metric_name: { type: TEXT, nullable: false, pk: true }
+      sql_expression: { type: TEXT, nullable: false }
+      business_description: { type: TEXT, nullable: true }
+      owner: { type: TEXT, nullable: true, values: ["Sales","Marketing","Finance","Operations"] }
+      deprecated: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.10 } }
+      depends_on: { type: TEXT, nullable: true }
+
+  _schema_docs:
+    layer: metadata
+    comment: "Table/column documentation. Some entries may be outdated or incorrect."
+    distribution:
+      rows: 200
+    columns:
+      table_name: { type: TEXT, nullable: false }
+      column_name: { type: TEXT, nullable: false }
+      description: { type: TEXT, nullable: true }
+      business_term: { type: TEXT, nullable: true }
+      is_current: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.80 } }

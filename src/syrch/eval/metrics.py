@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -20,6 +20,12 @@ class EvaluationMetrics:
     num_subtasks: int = 0
     max_depth: int = 0
     expected_provided: bool = False
+    error_types: list[str] = field(default_factory=list)
+    error_count: int = 0
+    retriever_recall: float = 0.0
+    retriever_precision: float = 0.0
+    dag_node_count: int = 0
+    dag_minimal: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -34,6 +40,12 @@ class EvaluationMetrics:
             "num_subtasks": self.num_subtasks,
             "max_depth": self.max_depth,
             "solution_confidence": self.solution.confidence,
+            "error_types": self.error_types,
+            "error_count": self.error_count,
+            "retriever_recall": self.retriever_recall,
+            "retriever_precision": self.retriever_precision,
+            "dag_node_count": self.dag_node_count,
+            "dag_minimal": self.dag_minimal,
         }
 
 

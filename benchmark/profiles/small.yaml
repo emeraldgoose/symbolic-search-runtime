@@ -1,0 +1,23 @@
+# Small profile — 20 tables, ~500K rows
+# For local dev and CI
+seed: 42
+batch_size: 50000
+
+schema:
+  include:
+    - sales.yaml
+    - customer.yaml
+    - marketing.yaml
+    - metadata.yaml
+    - noise.yaml
+
+quality:
+  null_ratio: 0.02
+  fk_break_ratio: 0.003
+  duplicate_ratio: 0.005
+  late_arrival_ratio: 0.01
+  outlier_ratio: 0.005
+
+output:
+  sqlite:
+    path: benchmark/generated/sqlite/benchmark_small.sqlite
