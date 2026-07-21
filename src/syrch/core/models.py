@@ -19,10 +19,18 @@ class TableSchema:
 
 
 @dataclass
+class ScoredTable:
+    schema: TableSchema
+    score: float = 0.0
+    match_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ProblemSpec:
     question: str
     schema: TableSchema
     all_schemas: list[TableSchema] | None = None
+    scored_schemas: list[ScoredTable] | None = None
     goal_metric: str | None = None
 
 
