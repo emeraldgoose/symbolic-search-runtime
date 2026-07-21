@@ -1,0 +1,125 @@
+tables:
+  dw_customer:
+    layer: dw
+    grain: customer
+    comment: "Customer dimension with SCD Type 2 tracking. For point-in-time analysis, join on valid_from/valid_to."
+    distribution:
+      rows: 10000
+    pk: customer_sk
+    scd_columns: [segment, tier, address_city]
+    columns:
+      customer_sk: { type: INTEGER, nullable: false, pk: true, comment: "Surrogate key for SCD" }
+      customer_id: { type: INTEGER, nullable: false, comment: "Natural key, may repeat across SCD rows" }
+      name: { type: TEXT, nullable: false }
+      email: { type: TEXT, nullable: true }
+      segment: { type: TEXT, nullable: false, values: ["VIP","Gold","Silver","Standard"], dist_params: { probs: [0.05, 0.15, 0.30, 0.50] } }
+      tier: { type: TEXT, nullable: true, values: ["Platinum","Gold","Silver","Bronze",null], dist_params: { probs: [0.02, 0.08, 0.20, 0.30, 0.40] } }
+      address_city: { type: TEXT, nullable: true }
+      signup_date: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2020-01-01", end: "2024-12-31" } }
+      valid_from: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2020-01-01", end: "2024-12-31" } }
+      valid_to: { type: DATE, nullable: true, distribution: uniform, dist_params: { start: "2021-01-01", end: "2024-12-31" } }
+      is_current: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.85 } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  dw_product:
+    layer: dw
+    grain: product
+    comment: "Product dimension. Price may vary over time (SCD)."
+    distribution:
+      rows: 5000
+    pk: product_id
+    scd_columns: [unit_price]
+    columns:
+      product_id: { type: INTEGER, nullable: false, pk: true }
+      product_name: { type: TEXT, nullable: false }
+      category_id: { type: INTEGER, nullable: true, fk: dim_category.category_id }
+      supplier_id: { type: INTEGER, nullable: true, fk: dim_supplier.supplier_id }
+      unit_price: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 3.5, sigma: 0.7 } }
+      cost_price: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 3.0, sigma: 0.6 } }
+      is_active: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.90 } }
+      valid_from: { type: DATE, nullable: false }
+      valid_to: { type: DATE, nullable: true, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  dim_category:
+    layer: dim
+    grain: category
+    comment: "Product category hierarchy (4 levels)."
+    distribution:
+      rows: 150
+    columns:
+      category_id: { type: INTEGER, nullable: false, pk: true }
+      category_name: { type: TEXT, nullable: false }
+      parent_category_id: { type: INTEGER, nullable: true, fk: dim_category.category_id }
+      level: { type: INTEGER, nullable: false, values: [1, 2, 3, 4] }
+
+  dim_store:
+    layer: dim
+    grain: store
+    comment: "Store dimension. Includes both online and offline stores."
+    distribution:
+      rows: 50
+    columns:
+      store_id: { type: INTEGER, nullable: false, pk: true }
+      store_name: { type: TEXT, nullable: false }
+      region: { type: TEXT, nullable: false, values: ["North","South","East","West","Central"] }
+      is_online: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.02 } }
+      opened_date: { type: DATE, nullable: false }
+
+  dim_employee:
+    layer: dim
+    grain: employee
+    comment: "Employee dimension with manager hierarchy (5 levels)."
+    distribution:
+      rows: 200
+    scd_columns: [department, position]
+    columns:
+      employee_id: { type: INTEGER, nullable: false, pk: true }
+      name: { type: TEXT, nullable: false }
+      department: { type: TEXT, nullable: false, values: ["Sales","Support","Marketing","Finance","Operations","HR"] }
+      position: { type: TEXT, nullable: false, values: ["Junior","Senior","Lead","Manager","Director","VP"] }
+      manager_id: { type: INTEGER, nullable: true, fk: dim_employee.employee_id }
+      store_id: { type: INTEGER, nullable: true, fk: dim_store.store_id }
+      valid_from: { type: DATE, nullable: false }
+      valid_to: { type: DATE, nullable: true, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
+
+  dim_supplier:
+    layer: dim
+    grain: supplier
+    comment: "Supplier dimension."
+    distribution:
+      rows: 200
+    columns:
+      supplier_id: { type: INTEGER, nullable: false, pk: true }
+      supplier_name: { type: TEXT, nullable: false }
+      region: { type: TEXT, nullable: true, values: ["Domestic","APAC","EMEA","Americas",null] }
+      lead_time_days: { type: INTEGER, nullable: true, distribution: normal, dist_params: { mean: 14, std: 5 } }
+
+  dim_date:
+    layer: dim
+    grain: date
+    comment: "Date dimension for time-based analysis."
+    distribution:
+      rows: 1096
+    columns:
+      date_key: { type: TEXT, nullable: false, pk: true }
+      year: { type: INTEGER, nullable: false }
+      quarter: { type: INTEGER, nullable: false, values: [1, 2, 3, 4] }
+      month: { type: INTEGER, nullable: false, values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] }
+      day_of_week: { type: INTEGER, nullable: false, values: [0, 1, 2, 3, 4, 5, 6] }
+      is_weekend: { type: BOOLEAN, nullable: false }
+      is_holiday: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.03 } }
+      season: { type: TEXT, nullable: false, values: ["Spring","Summer","Fall","Winter"] }
+
+  dim_customer_segment:
+    layer: dim
+    grain: segment
+    comment: "Customer segment definitions (RFM-based)."
+    distribution:
+      rows: 12
+    columns:
+      segment_id: { type: INTEGER, nullable: false, pk: true }
+      segment_name: { type: TEXT, nullable: false }
+      min_orders: { type: INTEGER, nullable: true }
+      min_spend: { type: REAL, nullable: true }
+      max_days_inactive: { type: INTEGER, nullable: true }

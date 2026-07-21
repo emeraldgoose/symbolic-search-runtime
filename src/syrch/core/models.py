@@ -19,10 +19,18 @@ class TableSchema:
 
 
 @dataclass
+class ScoredTable:
+    schema: TableSchema
+    score: float = 0.0
+    match_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ProblemSpec:
     question: str
     schema: TableSchema
     all_schemas: list[TableSchema] | None = None
+    scored_schemas: list[ScoredTable] | None = None
     goal_metric: str | None = None
 
 
@@ -46,6 +54,8 @@ class TaskNode:
     expected_output_desc: str = ""
     join_type: str = "all_of"
     join_keys: list[JoinKey] | None = None
+    hint_tables: list[str] | None = None
+    hint_columns: list[str] | None = None
     _children: list[str] | None = None
 
     def __hash__(self) -> int:
@@ -77,6 +87,7 @@ class NodeResult:
     cost_tokens: int = 0
     error: str | None = None
     ambiguity_score: float = 0.0
+    replan_request: str | None = None
 
 
 @dataclass

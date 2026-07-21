@@ -1,0 +1,156 @@
+tables:
+  # ── Pre-agg / Report (유인: LLM이 core 대신 이걸 선택하도록) ──
+  rpt_daily_sales_by_region:
+    layer: report
+    grain: daily_region
+    comment: "Pre-computed daily sales by region. May have stale data."
+    distribution:
+      rows: 5000
+    columns:
+      report_date: { type: TEXT, nullable: false }
+      region: { type: TEXT, nullable: false }
+      total_sales: { type: REAL, nullable: false }
+      row_count: { type: INTEGER, nullable: false }
+
+  rpt_monthly_kpi:
+    layer: report
+    grain: monthly
+    comment: "Monthly KPI report. Some metrics may be estimated."
+    distribution:
+      rows: 100
+    columns:
+      year_month: { type: TEXT, nullable: false }
+      kpi_name: { type: TEXT, nullable: false, values: ["revenue","profit","customer_acquisition","churn_rate"] }
+      kpi_value: { type: REAL, nullable: false }
+
+  rpt_customer_ltv:
+    layer: report
+    grain: customer
+    comment: "Pre-computed LTV by customer. May not include latest orders."
+    distribution:
+      rows: 10000
+    columns:
+      customer_id: { type: INTEGER, nullable: false }
+      ltv: { type: REAL, nullable: false }
+      last_order_date: { type: TEXT, nullable: true }
+      segment: { type: TEXT, nullable: true }
+
+  # ── Staging (유인: core처럼 보이지만 staging) ────────────────
+  stg_orders_daily:
+    layer: staging
+    grain: daily
+    comment: "Staging table for daily order loads. Incomplete data."
+    distribution:
+      rows: 1000
+    columns:
+      batch_id: { type: INTEGER, nullable: false }
+      load_date: { type: TEXT, nullable: false }
+      order_count: { type: INTEGER, nullable: false }
+      status: { type: TEXT, nullable: false, values: ["loaded","pending","failed"] }
+
+  stg_customer_import:
+    layer: staging
+    grain: customer
+    comment: "Staging table for customer imports. May contain duplicates."
+    distribution:
+      rows: 5000
+    columns:
+      import_id: { type: INTEGER, nullable: false, pk: true }
+      customer_id: { type: INTEGER, nullable: false }
+      name: { type: TEXT, nullable: false }
+      email: { type: TEXT, nullable: true }
+
+  # ── Archive ──────────────────────────────────────────────────
+  archive_orders_2021:
+    layer: archive
+    grain: order
+    comment: "Archived 2021 orders. For historical reference only."
+    distribution:
+      rows: 10000
+    columns:
+      order_id: { type: INTEGER, nullable: false }
+      customer_id: { type: INTEGER, nullable: false }
+      order_date: { type: TEXT, nullable: false }
+      total: { type: REAL, nullable: false }
+
+  archive_page_views_raw:
+    layer: archive
+    grain: event
+    comment: "Raw archived page views. Unstructured."
+    distribution:
+      rows: 50000
+    columns:
+      log_id: { type: INTEGER, nullable: false, pk: true }
+      url: { type: TEXT, nullable: false }
+      timestamp: { type: TEXT, nullable: false }
+      user_agent: { type: TEXT, nullable: true }
+      ip_address: { type: TEXT, nullable: true }
+
+  # ── Config ───────────────────────────────────────────────────
+  config_system:
+    layer: config
+    comment: "System configuration table. Not analytical."
+    distribution:
+      rows: 50
+    columns:
+      config_key: { type: TEXT, nullable: false, pk: true }
+      config_value: { type: TEXT, nullable: false }
+      description: { type: TEXT, nullable: true }
+
+  config_user_prefs:
+    layer: config
+    comment: "User preferences. Not for analytical queries."
+    distribution:
+      rows: 2000
+    columns:
+      user_id: { type: INTEGER, nullable: false }
+      pref_key: { type: TEXT, nullable: false }
+      pref_value: { type: TEXT, nullable: false }
+
+  # ── Audit ────────────────────────────────────────────────────
+  audit_login_attempts:
+    layer: audit
+    comment: "Login audit log. Not for business analysis."
+    distribution:
+      rows: 20000
+    columns:
+      attempt_id: { type: INTEGER, nullable: false, pk: true }
+      customer_id: { type: INTEGER, nullable: true }
+      timestamp: { type: TEXT, nullable: false }
+      success: { type: BOOLEAN, nullable: false }
+      ip_address: { type: TEXT, nullable: true }
+
+  audit_query_log:
+    layer: audit
+    comment: "SQL query audit log. Not analytical."
+    distribution:
+      rows: 10000
+    columns:
+      query_id: { type: INTEGER, nullable: false, pk: true }
+      user_id: { type: INTEGER, nullable: true }
+      query_text: { type: TEXT, nullable: false }
+      executed_at: { type: TEXT, nullable: false }
+      duration_ms: { type: INTEGER, nullable: false }
+
+  # ── Unrelated Dimensions ─────────────────────────────────────
+  dim_currency_rate:
+    layer: dim
+    grain: currency
+    comment: "Daily currency exchange rates."
+    distribution:
+      rows: 1000
+    columns:
+      currency_code: { type: TEXT, nullable: false }
+      rate_date: { type: TEXT, nullable: false }
+      rate_to_usd: { type: REAL, nullable: false }
+
+  dim_holiday:
+    layer: dim
+    grain: holiday
+    comment: "Holiday calendar by country."
+    distribution:
+      rows: 300
+    columns:
+      country: { type: TEXT, nullable: false }
+      holiday_date: { type: TEXT, nullable: false }
+      holiday_name: { type: TEXT, nullable: false }

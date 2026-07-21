@@ -1,0 +1,102 @@
+tables:
+  # ── Core Fact Tables ──────────────────────────────────────────
+  dw_sales_order:
+    layer: dw
+    grain: order
+    comment: "Sales orders at order grain. One row per order. Use for order-level analysis."
+    distribution:
+      rows: 50000
+    pk: order_id
+    columns:
+      order_id: { type: INTEGER, nullable: false, pk: true }
+      customer_id: { type: INTEGER, nullable: false, fk: dw_customer.customer_id }
+      store_id: { type: INTEGER, nullable: true, fk: dim_store.store_id }
+      employee_id: { type: INTEGER, nullable: true, fk: dim_employee.employee_id }
+      order_date: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
+      status: { type: TEXT, nullable: false, values: ["pending","completed","cancelled","refunded"], dist_params: { probs: [0.02, 0.88, 0.06, 0.04] } }
+      total_amount: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 4.5, sigma: 0.6 } }
+      paid_at: { type: DATETIME, nullable: true }
+      shipped_at: { type: DATETIME, nullable: true }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  dw_sales_item:
+    layer: dw
+    grain: line_item
+    comment: "Sales at order-item grain. One row per product in an order."
+    distribution:
+      rows: 200000
+    columns:
+      item_id: { type: INTEGER, nullable: false, pk: true }
+      order_id: { type: INTEGER, nullable: false, fk: dw_sales_order.order_id }
+      product_id: { type: INTEGER, nullable: false, fk: dw_product.product_id }
+      quantity: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.5, min: 1, max: 50 } }
+      unit_price: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 3.5, sigma: 0.7 } }
+      discount: { type: REAL, nullable: true, distribution: uniform, dist_params: { min: 0.0, max: 0.3 } }
+      etl_loaded_at: { type: DATETIME, nullable: false }
+
+  # ── Mart (Pre-agg) ────────────────────────────────────────────
+  mart_sales_daily:
+    layer: mart
+    grain: daily
+    comment: "Pre-aggregated daily sales metrics. Use for trend queries."
+    distribution:
+      rows: 1096
+    cluster_by: [sale_date]
+    columns:
+      sale_date: { type: DATE, nullable: false, pk: true, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
+      total_orders: { type: INTEGER, nullable: false }
+      total_items_sold: { type: INTEGER, nullable: false }
+      total_revenue: { type: REAL, nullable: false }
+      is_complete: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.95 } }
+
+  mart_sales_monthly:
+    layer: mart
+    grain: monthly
+    comment: "Pre-aggregated monthly sales metrics."
+    distribution:
+      rows: 36
+    cluster_by: [sale_month]
+    columns:
+      sale_month: { type: TEXT, nullable: false, pk: true, values: ["2022-01","2022-02","2022-03","2022-04","2022-05","2022-06","2022-07","2022-08","2022-09","2022-10","2022-11","2022-12","2023-01","2023-02","2023-03","2023-04","2023-05","2023-06","2023-07","2023-08","2023-09","2023-10","2023-11","2023-12","2024-01","2024-02","2024-03","2024-04","2024-05","2024-06","2024-07","2024-08","2024-09","2024-10","2024-11","2024-12"] }
+      total_revenue: { type: REAL, nullable: false }
+      total_orders: { type: INTEGER, nullable: false }
+      active_customers: { type: INTEGER, nullable: false }
+
+  # ── Legacy Tables (Noise — 유인용) ────────────────────────────
+  sales_fact:
+    layer: legacy
+    grain: order
+    comment: "Legacy sales table. Some teams still reference this. Prefer dw_sales_order."
+    distribution:
+      rows: 50000
+    columns:
+      order_id: { type: INTEGER, nullable: false, pk: true }
+      cust_id: { type: INTEGER, nullable: false, comment: "Customer ID (naming drift: use customer_id in dw_sales_order)" }
+      amt: { type: REAL, nullable: false, comment: "Old name for total_amount" }
+      order_dt: { type: TEXT, nullable: false, comment: "Old date format: YYYYMMDD" }
+      status: { type: TEXT, nullable: false, values: ["O","C","X"] }
+
+  sales_fact_v2:
+    layer: legacy
+    grain: line_item
+    comment: "v2 of legacy sales fact. Migration incomplete — some data still flows here."
+    distribution:
+      rows: 200000
+    columns:
+      line_id: { type: INTEGER, nullable: false, pk: true }
+      order_id: { type: INTEGER, nullable: false }
+      client_id: { type: INTEGER, nullable: false, comment: "Yet another name for customer_id" }
+      product_id: { type: INTEGER, nullable: false }
+      qty: { type: INTEGER, nullable: false }
+      price: { type: REAL, nullable: false }
+
+  sales_summary:
+    layer: legacy
+    grain: mixed
+    comment: "Pre-computed summary. May not match actual data."
+    distribution:
+      rows: 500
+    columns:
+      report_date: { type: TEXT, nullable: false }
+      metric: { type: TEXT, nullable: false, values: ["revenue","orders","customers"] }
+      value: { type: REAL, nullable: false }

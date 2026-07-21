@@ -1,0 +1,14 @@
+# Databricks Enterprise profile — same data as enterprise, Delta output
+# Requires: databricks-connect or local Spark with Delta
+extends: enterprise
+
+output:
+  delta:
+    catalog: syrch_benchmark
+    schema: enterprise
+    mode: overwrite
+    clustering: liquid
+    optimize: true
+    tblproperties:
+      delta.autoOptimize.optimizeWrite: "true"
+      delta.autoOptimize.autoCompact: "true"
