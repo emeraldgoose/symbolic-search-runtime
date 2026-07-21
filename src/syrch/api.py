@@ -101,8 +101,13 @@ def query(
 
     problem = ProblemSpec(question=question, schema=schema, all_schemas=all_schemas)
 
+    def _ask_user(question: str) -> str:
+        return input(f"\n? {question}\n> ")
+
+    user_callback = _ask_user if cfg.interactive else None
+
     try:
-        solution, dag, results = run_pipeline(llm, executor, cfg, problem)
+        solution, dag, results = run_pipeline(llm, executor, cfg, problem, user_callback=user_callback)
     finally:
         executor.close()
 
