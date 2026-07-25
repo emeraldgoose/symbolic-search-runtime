@@ -110,7 +110,9 @@ class DatabricksExecutor(BaseExecutor):
             self._connect()
         assert self._conn is not None
         catalog, schema, table = self._parse_fqn(table_name)
-        logger.debug("Fetching schema for table: %s", table_name)
+        catalog = catalog or self.catalog
+        schema = schema or self.schema_name
+        logger.debug("Fetching schema for table: %s catalog=%s schema=%s", table_name, catalog, schema)
         with self._conn.cursor() as cursor:
             cursor.columns(catalog_name=catalog, schema_name=schema, table_name=table)
             columns = [

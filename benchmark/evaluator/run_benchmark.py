@@ -508,6 +508,11 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Verbose LLM output")
     parser.add_argument("--max-level", type=int, default=5, help="Maximum escalation level")
     parser.add_argument("--export", help="Export results to JSON file")
+    parser.add_argument("--server-hostname", help="Databricks server hostname")
+    parser.add_argument("--http-path", help="Databricks HTTP path")
+    parser.add_argument("--token", help="Databricks access token")
+    parser.add_argument("--catalog", help="Databricks Unity Catalog name")
+    parser.add_argument("--schema", help="Databricks schema name")
     args = parser.parse_args()
 
     results = run_benchmark(
@@ -522,6 +527,11 @@ def main() -> None:
         skip_cache=args.skip_cache,
         verbose=args.verbose,
         max_level=args.max_level,
+        server_hostname=args.server_hostname,
+        http_path=args.http_path,
+        token=args.token,
+        db_catalog=args.catalog,
+        db_schema=args.schema,
     )
 
     print_summary(results)
