@@ -35,7 +35,7 @@ class SQLiteExecutor(BaseExecutor):
             table_name = self.list_tables()[0]
         cursor = conn.execute(f"PRAGMA table_info({table_name})")
         columns = [
-            ColumnSchema(name=row[1], type=row[2], nullable=not row[3])
+            ColumnSchema(name=row[1], type=row[2], nullable=not row[3], description=None)
             for row in cursor.fetchall()
         ]
         return TableSchema(name=table_name, columns=columns)

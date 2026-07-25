@@ -113,10 +113,13 @@ class DatabricksExecutor(BaseExecutor):
         logger.debug("Fetching schema for table: %s", table_name)
         with self._conn.cursor() as cursor:
             cursor.columns(catalog_name=catalog, schema_name=schema, table_name=table)
-            columns = [
-                ColumnSchema(name=row[2], type=row[5])
-                for row in cursor.fetchall()
-            ]
+            rows = cursor.fetchall()
+            columns = []
+            for row in rows:
+                desc: str | None = None
+                if len(row) > 11 and row[11] is not None and str(row[11]).strip():
+                    desc = str(row[11]).strip()
+                columns.append(ColumnSchema(name=row[2], type=row[5], description=desc))
         return TableSchema(name=table_name, columns=columns)
 
     def list_tables(self) -> list[str]:

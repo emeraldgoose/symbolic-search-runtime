@@ -31,10 +31,17 @@ class JDBCExecutor(BaseExecutor):
         assert self._conn is not None
         if table_name is None:
             table_name = self.list_tables()[0]
-        result = self._conn.execute(f"SELECT * FROM {table_name} LIMIT 0")
+
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(self._engine)
+        cols_info = inspector.get_columns(table_name)
         columns = [
-            ColumnSchema(name=col.name, type=str(col.type))
-            for col in result.cursor.description
+            ColumnSchema(
+                name=c["name"],
+                type=str(c["type"]),
+                description=c.get("comment", None),
+            )
+            for c in cols_info
         ]
         return TableSchema(name=table_name, columns=columns)
 

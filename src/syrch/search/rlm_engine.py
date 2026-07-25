@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import pandas as pd
 
+import re
+
 from syrch.core.config import ExecutionConfig
 from syrch.core.models import NodeResult, ReasoningPath, TaskNode
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.calibrator import ExecutionSignals, calibrate
 from syrch.search.clarify import compute_ambiguity_score
+from syrch.search.retriever import Retriever
 
 RLM_SYSTEM = """You are a search agent working inside a SQL query environment.
 You have access to:
@@ -36,10 +39,19 @@ Do NOT forget the confidence line. A confidence of 1.0 means absolutely certain.
 class RLMAgent:
     MAX_ROWS_WARNING = 1000
 
-    def __init__(self, llm: BaseLLM, executor: BaseExecutor, config: ExecutionConfig):
+    def __init__(
+        self,
+        llm: BaseLLM,
+        executor: BaseExecutor,
+        config: ExecutionConfig,
+        retriever: Retriever | None = None,
+        all_schemas: list | None = None,
+    ):
         self.llm = llm
         self.executor = executor
         self.config = config
+        self.retriever = retriever
+        self.all_schemas = all_schemas
         self._compressed_schemas: list | None = None
 
     def set_compressed_schemas(self, schemas: list | None) -> None:
@@ -49,15 +61,21 @@ class RLMAgent:
         if self._compressed_schemas is not None:
             parts: list[str] = []
             for s in self._compressed_schemas:
-                cols = ", ".join(f"{c.name} ({c.type})" for c in s.columns)
-                parts.append(f"Table: {s.name}\nColumns: {cols}")
+                col_parts = []
+                for c in s.columns:
+                    desc = f" ({c.description})" if c.description else ""
+                    col_parts.append(f"{c.name} ({c.type}){desc}")
+                parts.append(f"Table: {s.name}\nColumns: {', '.join(col_parts)}")
             return "\n\n".join(parts) if parts else "No tables available."
         tables = self.executor.list_tables()
         parts = []
         for t in tables:
             schema = self.executor.get_schema(t)
-            cols = ", ".join(f"{c.name} ({c.type})" for c in schema.columns)
-            parts.append(f"Table: {schema.name}\nColumns: {cols}")
+            col_parts = []
+            for c in schema.columns:
+                desc = f" ({c.description})" if c.description else ""
+                col_parts.append(f"{c.name} ({c.type}){desc}")
+            parts.append(f"Table: {schema.name}\nColumns: {', '.join(col_parts)}")
         return "\n\n".join(parts)
 
     def _build_valid_columns(self) -> set[str]:
@@ -224,6 +242,18 @@ class RLMAgent:
                 user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
                 continue
 
+            semantic_feedback = self._check_semantic_match(data, sql, node)
+            if semantic_feedback:
+                signals.quality_warnings.append(semantic_feedback)
+                user_prompt = (
+                    f"Semantic mismatch: {semantic_feedback}\n\n"
+                    f"Try a different SQL query. "
+                    f"Use the correct tables and columns to match the question."
+                )
+                if attempt < self.config.max_attempts_per_node - 1:
+                    self._expand_compressed_schemas(semantic_feedback, data)
+                continue
+
             if confidence >= self.config.high_confidence:
                 break
 
@@ -314,6 +344,75 @@ class RLMAgent:
                 f"Consider adding LIMIT or aggregation."
             )
         return None
+
+    def _check_semantic_match(
+        self,
+        data: pd.DataFrame,
+        sql: str,
+        node: TaskNode,
+    ) -> str | None:
+        result_cols = set(c.lower() for c in data.columns)
+
+        if node.hint_columns:
+            hinted = set(c.lower() for c in node.hint_columns)
+            overlap = result_cols & hinted
+            if not overlap:
+                return (
+                    f"Result columns {list(data.columns)} do not include "
+                    f"expected hint columns {node.hint_columns}"
+                )
+
+        sql_upper = sql.upper()
+        has_group_by = "GROUP BY" in sql_upper
+        has_aggregation = any(
+            kw in sql_upper for kw in ["COUNT(", "SUM(", "AVG(", "MIN(", "MAX("]
+        )
+
+        if has_group_by and len(data) == 1:
+            return (
+                "Query uses GROUP BY but only returned 1 row. "
+                "Expected multiple rows for grouped result."
+            )
+
+        if has_aggregation and not has_group_by and len(data) == 1 and data.isna().all(axis=None) is False:
+            pass
+
+        if not has_group_by and not has_aggregation and len(data) > 3:
+            question_lower = node.description.lower()
+            singular_phrases = ["what is", "what's", "how many", "how much", "total", "average"]
+            if any(p in question_lower for p in singular_phrases):
+                return (
+                    f"Question seems to expect a single value "
+                    f"but query returned {len(data)} rows. "
+                    f"Add aggregation without GROUP BY or use LIMIT."
+                )
+
+        return None
+
+    def _expand_compressed_schemas(
+        self,
+        reason: str,
+        data: pd.DataFrame,
+    ) -> None:
+        if not self.retriever:
+            return
+        question_words = set(re.findall(r"[a-zA-Z0-9_]\w*", reason.lower()))
+        missing_col = None
+        for phrase in ["column", "hint column", "expected", "missing"]:
+            if phrase in reason.lower():
+                for w in question_words:
+                    if len(w) > 2 and w not in ("the", "not", "for", "with", "are"):
+                        missing_col = w
+                        break
+        if missing_col and self.retriever:
+            broad = self.retriever.score(missing_col)
+            new_names = set(st.schema.name for st in broad.matched_tables[:3])
+            if self._compressed_schemas:
+                existing = set(s.name for s in self._compressed_schemas)
+                missing_schemas = [s for s in self.all_schemas or []
+                                   if s.name in new_names and s.name not in existing]
+                if missing_schemas:
+                    self._compressed_schemas.extend(missing_schemas)
 
     def _is_non_recoverable(self, error_msg: str, node: TaskNode) -> bool:
         """Determine if an execution error requires replanning vs simple retry."""

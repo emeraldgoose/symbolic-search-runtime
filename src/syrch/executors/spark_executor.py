@@ -73,7 +73,14 @@ class SparkExecutor(BaseExecutor):
                 rows = self._spark.sql(f"DESCRIBE {table_name}").collect()
             else:
                 raise
-        columns = [ColumnSchema(name=r.col_name, type=r.data_type) for r in rows]
+        columns = [
+            ColumnSchema(
+                name=r.col_name,
+                type=r.data_type,
+                description=str(r.comment).strip() if r.comment and str(r.comment).strip() else None,
+            )
+            for r in rows
+        ]
         return TableSchema(name=table_name, columns=columns)
 
     def list_tables(self) -> list[str]:

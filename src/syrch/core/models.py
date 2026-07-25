@@ -10,12 +10,14 @@ class ColumnSchema:
     name: str
     type: str
     nullable: bool = True
+    description: str | None = None
 
 
 @dataclass
 class TableSchema:
     name: str
     columns: list[ColumnSchema]
+    description: str | None = None
 
 
 @dataclass
@@ -26,12 +28,23 @@ class ScoredTable:
 
 
 @dataclass
+class ScoredSchemaEvidence:
+    matched_tables: list[ScoredTable] = field(default_factory=list)
+    matched_columns: list[ColumnSchema] = field(default_factory=list)
+    grain_hints: list[str] = field(default_factory=list)
+    metric_hints: list[str] = field(default_factory=list)
+    time_columns: list[str] = field(default_factory=list)
+    all_schemas: list[TableSchema] = field(default_factory=list)
+
+
+@dataclass
 class ProblemSpec:
     question: str
     schema: TableSchema
     all_schemas: list[TableSchema] | None = None
     scored_schemas: list[ScoredTable] | None = None
     goal_metric: str | None = None
+    evidence: ScoredSchemaEvidence | None = None
 
 
 @dataclass

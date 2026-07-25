@@ -5,6 +5,7 @@ import logging
 from syrch.core.models import JoinKey, NodeResult, ProblemSpec, TableSchema, TaskDAG, TaskNode
 from syrch.core.config import ExecutionConfig
 from syrch.llm.base import BaseLLM
+from syrch.search.retriever import Retriever
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,10 @@ def compute_layers(nodes: dict[str, TaskNode]) -> list[list[str]]:
 
 
 class Planner:
-    def __init__(self, llm: BaseLLM, config: ExecutionConfig):
+    def __init__(self, llm: BaseLLM, config: ExecutionConfig, retriever: Retriever | None = None):
         self.llm = llm
         self.config = config
+        self.retriever = retriever
 
     def decompose(self, problem: ProblemSpec) -> TaskDAG:
         dag = self._decompose_level(problem, depth=0)
@@ -167,6 +169,10 @@ class Planner:
                 schema=schemas[0],
                 all_schemas=schemas,
             )
+            if self.retriever and sub_problem.scored_schemas is None:
+                sub_evidence = self.retriever.score(node.description)
+                sub_problem.scored_schemas = sub_evidence.matched_tables
+                sub_problem.evidence = sub_evidence
             sub_dag = self._decompose_level(sub_problem, depth=depth + 1)
             self._recursive_expand(sub_dag, depth + 1, schemas)
             self._merge_sub_dag(dag, node, sub_dag)
@@ -211,10 +217,25 @@ class Planner:
 
     def _build_user_prompt(self, problem: ProblemSpec) -> str:
         scored = problem.scored_schemas
+        evidence = problem.evidence
+
+        hint_lines: list[str] = []
+        if evidence:
+            if evidence.grain_hints:
+                hint_lines.append(f"Detected grain/aggregation hints: {', '.join(evidence.grain_hints)}")
+            if evidence.metric_hints:
+                hint_lines.append(f"Detected metric hints: {', '.join(evidence.metric_hints)}")
+            if evidence.time_columns:
+                hint_lines.append(f"Time/date columns available: {', '.join(evidence.time_columns[:6])}")
+
         if scored:
             table_lines: list[str] = []
             for s in scored:
-                cols_str = ", ".join(f"{c.name}({c.type})" for c in s.schema.columns)
+                col_parts = []
+                for c in s.schema.columns:
+                    desc = f" ({c.description})" if c.description else ""
+                    col_parts.append(f"{c.name}({c.type}){desc}")
+                cols_str = ", ".join(col_parts)
                 reason_str = "; ".join(s.match_reasons[:2])
                 table_lines.append(
                     f"Table: {s.schema.name}  score={s.score:.2f}  [{reason_str}]\n"
@@ -225,14 +246,21 @@ class Planner:
             all_schemas = problem.all_schemas or [problem.schema]
             table_lines = []
             for tbl in all_schemas:
-                cols_str = ", ".join(f"{c.name} ({c.type})" for c in tbl.columns)
+                col_parts = []
+                for c in tbl.columns:
+                    desc = f" ({c.description})" if c.description else ""
+                    col_parts.append(f"{c.name} ({c.type}){desc}")
+                cols_str = ", ".join(col_parts)
                 table_lines.append(f"Table: {tbl.name}\n  Columns: {cols_str}")
             tables_str = "\n".join(table_lines)
-        return f"""Question: {problem.question}
 
-{tables_str}
+        sections = [f"Question: {problem.question}"]
+        if hint_lines:
+            sections.append("\n".join(hint_lines))
+        sections.append(tables_str)
+        sections.append("Decompose this into sub-tasks. Follow the JSON output format exactly. Each sub-task MUST include hint_tables.")
 
-Decompose this into sub-tasks. Follow the JSON output format exactly. Each sub-task MUST include hint_tables."""
+        return "\n\n".join(sections)
 
     def _resolve_root(self, nodes: dict[str, TaskNode]) -> str:
         for nid, node in nodes.items():

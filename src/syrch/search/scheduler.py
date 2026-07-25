@@ -10,6 +10,7 @@ from syrch.core.models import NodeResult, TaskDAG, TaskNode
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.planner import compute_layers
+from syrch.search.retriever import Retriever
 from syrch.search.rlm_engine import RLMAgent
 
 logger = logging.getLogger(__name__)
@@ -24,11 +25,13 @@ class Scheduler:
         agent: RLMAgent | None = None,
         compressed_schemas: list | None = None,
         replan_callback: Callable | None = None,
+        retriever: Retriever | None = None,
+        all_schemas: list | None = None,
     ):
         self.llm = llm
         self.executor = executor
         self.config = config
-        self.agent = agent or RLMAgent(llm, executor, config)
+        self.agent = agent or RLMAgent(llm, executor, config, retriever=retriever, all_schemas=all_schemas)
         if compressed_schemas is not None:
             self.agent.set_compressed_schemas(compressed_schemas)
         self.replan_callback = replan_callback

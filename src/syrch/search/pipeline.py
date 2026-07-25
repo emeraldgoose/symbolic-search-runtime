@@ -9,18 +9,28 @@ from syrch.llm.base import BaseLLM
 from syrch.search.aggregator import Aggregator
 from syrch.search.clarify import run_clarification
 from syrch.search.planner import Planner
-from syrch.search.retriever import Retriever
+from syrch.search.retriever import Retriever, ScoredSchemaEvidence
 from syrch.search.scheduler import Scheduler
 
 
-def compress_schema(dag: TaskDAG, all_schemas: list[TableSchema]) -> list[TableSchema]:
+def compress_schema(
+    dag: TaskDAG,
+    all_schemas: list[TableSchema],
+    evidence: ScoredSchemaEvidence | None = None,
+) -> list[TableSchema]:
     hinted_names: set[str] = set()
     for node in dag.nodes.values():
         if node.hint_tables:
             hinted_names.update(node.hint_tables)
     if not hinted_names:
         return all_schemas
-    return [s for s in all_schemas if s.name in hinted_names]
+    hinted = [s for s in all_schemas if s.name in hinted_names]
+    if hinted:
+        return hinted
+    if evidence and evidence.matched_tables:
+        top_names = [st.schema.name for st in evidence.matched_tables[:5]]
+        return [s for s in all_schemas if s.name in top_names]
+    return all_schemas
 
 
 def run_pipeline(
@@ -32,11 +42,14 @@ def run_pipeline(
 ) -> tuple[FinalSolution, TaskDAG, dict[str, NodeResult]]:
     if problem.all_schemas is None:
         problem.all_schemas = [executor.get_schema(t) for t in executor.list_tables()]
-    if problem.scored_schemas is None:
-        retriever = Retriever()
-        problem.scored_schemas = retriever.score(problem.question, problem.all_schemas)
 
-    planner = Planner(llm, config)
+    retriever = Retriever(problem.all_schemas)
+    if problem.scored_schemas is None or problem.evidence is None:
+        evidence = retriever.score(problem.question)
+        problem.scored_schemas = evidence.matched_tables
+        problem.evidence = evidence
+
+    planner = Planner(llm, config, retriever=retriever)
     dag = planner.decompose(problem)
 
     amended_question, qa_pairs = run_clarification(
@@ -55,7 +68,7 @@ def run_pipeline(
         scored_schemas=problem.scored_schemas,
     )
 
-    compressed = compress_schema(dag, all_schemas_list)
+    compressed = compress_schema(dag, all_schemas_list, evidence=problem.evidence)
 
     scored_for_replan: list = problem.scored_schemas or []
 
@@ -68,7 +81,7 @@ def run_pipeline(
             node_result=node_result,
             scored_schemas=scored_for_replan,
         )
-        new_compressed = compress_schema(new_dag, all_schemas_list)
+        new_compressed = compress_schema(new_dag, all_schemas_list, evidence=problem.evidence)
         scheduler.agent.set_compressed_schemas(new_compressed)
         return new_dag
 
@@ -76,6 +89,8 @@ def run_pipeline(
         llm, executor, config,
         compressed_schemas=compressed,
         replan_callback=_on_replan,
+        retriever=retriever,
+        all_schemas=all_schemas_list,
     )
     results = scheduler.run(dag)
     aggregator = Aggregator(llm, executor, config)
