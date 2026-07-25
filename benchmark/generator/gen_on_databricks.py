@@ -131,6 +131,11 @@ for table_def in all_tables_sorted:
         escaped = table_def.comment.replace("'", "\\'")
         spark.sql(f"COMMENT ON TABLE {tb_name} IS '{escaped}'")
 
+    for c in table_def.columns:
+        if c.comment:
+            escaped = c.comment.replace("'", "\\'")
+            spark.sql(f"ALTER TABLE {tb_name} ALTER COLUMN {c.name} COMMENT '{escaped}'")
+
     tblproperties = profile.get("output", {}).get("delta", {}).get("tblproperties", {})
     for key, val in tblproperties.items():
         spark.sql(f"ALTER TABLE {tb_name} SET TBLPROPERTIES ('{key}' = '{val}')")

@@ -10,15 +10,15 @@ tables:
       event_id: { type: INTEGER, nullable: false, pk: true }
       session_id: { type: TEXT, nullable: false }
       customer_id: { type: INTEGER, nullable: true, fk: dw_customer.customer_id }
-      event_type: { type: TEXT, nullable: false,
+      event_type: { type: TEXT, nullable: false, comment: "Event type name",
         values: ["page_view","search","product_view","cart_add","cart_remove","cart_view",
                  "checkout_start","purchase_complete","refund_request","login","logout",
                  "review_submit","wishlist_add","promotion_click","error_page"],
         dist_params: { probs: [0.35, 0.08, 0.12, 0.06, 0.03, 0.02, 0.04, 0.025, 0.003,
                                0.10, 0.08, 0.01, 0.015, 0.01, 0.007] }
       }
-      event_timestamp: { type: DATETIME, nullable: false }
-      traffic_source: { type: TEXT, nullable: true,
+      event_timestamp: { type: DATETIME, nullable: false, comment: "Event occurrence timestamp" }
+      traffic_source: { type: TEXT, nullable: true, comment: "Traffic source category",
         values: ["organic","paid","referral","email","social","direct",null],
         dist_params: { probs: [0.35, 0.20, 0.10, 0.10, 0.10, 0.13, 0.02] }
       }
@@ -43,10 +43,10 @@ tables:
       impression_id: { type: INTEGER, nullable: false, pk: true }
       campaign_id: { type: INTEGER, nullable: false, fk: dim_campaign.campaign_id }
       channel_id: { type: INTEGER, nullable: false, fk: dim_channel.channel_id }
-      impression_date: { type: DATE, nullable: false }
-      impressions: { type: INTEGER, nullable: false, distribution: normal, dist_params: { mean: 5000, std: 2000 } }
-      clicks: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.0, min: 1, max: 1000 } }
-      spend: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 6.0, sigma: 1.0 } }
+      impression_date: { type: DATE, nullable: false, comment: "Impression date" }
+      impressions: { type: INTEGER, nullable: false, distribution: normal, dist_params: { mean: 5000, std: 2000 }, comment: "Number of impressions" }
+      clicks: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.0, min: 1, max: 1000 }, comment: "Number of clicks" }
+      spend: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 6.0, sigma: 1.0 }, comment: "Campaign spend amount" }
       etl_loaded_at: { type: DATETIME, nullable: false }
 
   fact_campaign_clicks:
@@ -60,7 +60,7 @@ tables:
       campaign_id: { type: INTEGER, nullable: false, fk: dim_campaign.campaign_id }
       customer_id: { type: INTEGER, nullable: true, fk: dw_customer.customer_id }
       click_timestamp: { type: DATETIME, nullable: false }
-      converted: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.03 } }
+      converted: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.03 }, comment: "Conversion flag" }
       etl_loaded_at: { type: DATETIME, nullable: false }
 
   dim_campaign:
@@ -71,11 +71,11 @@ tables:
       rows: 200
     columns:
       campaign_id: { type: INTEGER, nullable: false, pk: true }
-      campaign_name: { type: TEXT, nullable: false }
-      campaign_type: { type: TEXT, nullable: false, values: ["email","social","search","display","affiliate"] }
-      start_date: { type: DATE, nullable: false }
-      end_date: { type: DATE, nullable: true }
-      budget: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 8.0, sigma: 1.5 } }
+      campaign_name: { type: TEXT, nullable: false, comment: "Campaign name" }
+      campaign_type: { type: TEXT, nullable: false, values: ["email","social","search","display","affiliate"], comment: "Campaign type" }
+      start_date: { type: DATE, nullable: false, comment: "Campaign start date" }
+      end_date: { type: DATE, nullable: true, comment: "Campaign end date" }
+      budget: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 8.0, sigma: 1.5 }, comment: "Campaign budget amount" }
 
   dim_channel:
     layer: dim
@@ -85,5 +85,5 @@ tables:
       rows: 15
     columns:
       channel_id: { type: INTEGER, nullable: false, pk: true }
-      channel_name: { type: TEXT, nullable: false }
-      channel_type: { type: TEXT, nullable: false, values: ["paid","organic","social","email","referral"] }
+      channel_name: { type: TEXT, nullable: false, comment: "Channel name" }
+      channel_type: { type: TEXT, nullable: false, values: ["paid","organic","social","email","referral"], comment: "Channel type" }

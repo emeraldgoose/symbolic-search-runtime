@@ -12,11 +12,11 @@ tables:
       customer_id: { type: INTEGER, nullable: false, fk: dw_customer.customer_id }
       store_id: { type: INTEGER, nullable: true, fk: dim_store.store_id }
       employee_id: { type: INTEGER, nullable: true, fk: dim_employee.employee_id }
-      order_date: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
-      status: { type: TEXT, nullable: false, values: ["pending","completed","cancelled","refunded"], dist_params: { probs: [0.02, 0.88, 0.06, 0.04] } }
-      total_amount: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 4.5, sigma: 0.6 } }
-      paid_at: { type: DATETIME, nullable: true }
-      shipped_at: { type: DATETIME, nullable: true }
+      order_date: { type: DATE, nullable: false, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" }, comment: "Order placement date" }
+      status: { type: TEXT, nullable: false, values: ["pending","completed","cancelled","refunded"], dist_params: { probs: [0.02, 0.88, 0.06, 0.04] }, comment: "Order status" }
+      total_amount: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 4.5, sigma: 0.6 }, comment: "Total order revenue amount" }
+      paid_at: { type: DATETIME, nullable: true, comment: "Payment timestamp" }
+      shipped_at: { type: DATETIME, nullable: true, comment: "Delivery timestamp" }
       etl_loaded_at: { type: DATETIME, nullable: false }
 
   dw_sales_item:
@@ -29,9 +29,9 @@ tables:
       item_id: { type: INTEGER, nullable: false, pk: true }
       order_id: { type: INTEGER, nullable: false, fk: dw_sales_order.order_id }
       product_id: { type: INTEGER, nullable: false, fk: dw_product.product_id }
-      quantity: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.5, min: 1, max: 50 } }
-      unit_price: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 3.5, sigma: 0.7 } }
-      discount: { type: REAL, nullable: true, distribution: uniform, dist_params: { min: 0.0, max: 0.3 } }
+      quantity: { type: INTEGER, nullable: false, distribution: zipf, dist_params: { a: 2.5, min: 1, max: 50 }, comment: "Quantity ordered" }
+      unit_price: { type: REAL, nullable: false, distribution: lognormal, dist_params: { mean: 3.5, sigma: 0.7 }, comment: "Unit price per item" }
+      discount: { type: REAL, nullable: true, distribution: uniform, dist_params: { min: 0.0, max: 0.3 }, comment: "Discount rate" }
       etl_loaded_at: { type: DATETIME, nullable: false }
 
   # ── Mart (Pre-agg) ────────────────────────────────────────────
@@ -43,11 +43,11 @@ tables:
       rows: 1096
     cluster_by: [sale_date]
     columns:
-      sale_date: { type: DATE, nullable: false, pk: true, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" } }
-      total_orders: { type: INTEGER, nullable: false }
-      total_items_sold: { type: INTEGER, nullable: false }
-      total_revenue: { type: REAL, nullable: false }
-      is_complete: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.95 } }
+      sale_date: { type: DATE, nullable: false, pk: true, distribution: uniform, dist_params: { start: "2022-01-01", end: "2024-12-31" }, comment: "Sale date" }
+      total_orders: { type: INTEGER, nullable: false, comment: "Daily order count" }
+      total_items_sold: { type: INTEGER, nullable: false, comment: "Daily items sold count" }
+      total_revenue: { type: REAL, nullable: false, comment: "Daily aggregated revenue" }
+      is_complete: { type: BOOLEAN, nullable: false, dist_params: { p_true: 0.95 }, comment: "Completeness flag" }
 
   mart_sales_monthly:
     layer: mart
@@ -58,9 +58,9 @@ tables:
     cluster_by: [sale_month]
     columns:
       sale_month: { type: TEXT, nullable: false, pk: true, values: ["2022-01","2022-02","2022-03","2022-04","2022-05","2022-06","2022-07","2022-08","2022-09","2022-10","2022-11","2022-12","2023-01","2023-02","2023-03","2023-04","2023-05","2023-06","2023-07","2023-08","2023-09","2023-10","2023-11","2023-12","2024-01","2024-02","2024-03","2024-04","2024-05","2024-06","2024-07","2024-08","2024-09","2024-10","2024-11","2024-12"] }
-      total_revenue: { type: REAL, nullable: false }
-      total_orders: { type: INTEGER, nullable: false }
-      active_customers: { type: INTEGER, nullable: false }
+      total_revenue: { type: REAL, nullable: false, comment: "Monthly aggregated revenue" }
+      total_orders: { type: INTEGER, nullable: false, comment: "Monthly order count" }
+      active_customers: { type: INTEGER, nullable: false, comment: "Monthly active customer count" }
 
   # ── Legacy Tables (Noise — 유인용) ────────────────────────────
   sales_fact:
