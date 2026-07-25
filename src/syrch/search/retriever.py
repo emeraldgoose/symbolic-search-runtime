@@ -164,6 +164,8 @@ class Retriever:
             if metric:
                 found_metrics.add(metric)
 
+        alias_map = _build_alias_map(keywords, matched_tables)
+
         return ScoredSchemaEvidence(
             matched_tables=matched_tables,
             matched_columns=[
@@ -174,6 +176,7 @@ class Retriever:
             grain_hints=sorted(found_grain),
             metric_hints=sorted(found_metrics),
             time_columns=sorted(set(found_time_cols)),
+            alias_map=alias_map,
             all_schemas=self.all_schemas,
         )
 
@@ -275,3 +278,40 @@ def _resolve_matched_columns(
                     seen.add(key)
                     result.append((table, col))
     return result
+
+
+def _build_alias_map(
+    keywords: set[str],
+    matched_tables: list[ScoredTable],
+) -> dict[str, list[tuple[str, str, str | None]]]:
+    alias_map: dict[str, list[tuple[str, str, str | None]]] = {}
+
+    for kw in keywords:
+        category = _METRIC_KEYWORDS.get(kw)
+        if not category:
+            continue
+
+        for st in matched_tables:
+            for col in st.schema.columns:
+                name_lower = col.name.lower()
+                parts = set(name_lower.split("_"))
+
+                is_numeric = col.type.upper() in (
+                    "INT", "INTEGER", "BIGINT", "REAL", "FLOAT",
+                    "DOUBLE", "DECIMAL", "NUMERIC",
+                )
+
+                if kw in parts or category in parts:
+                    agg = "SUM" if is_numeric else None
+                    entry = (col.name, st.schema.name, agg)
+                    if entry not in alias_map.setdefault(kw, []):
+                        alias_map[kw].append(entry)
+                    continue
+
+                if col.description and kw in col.description.lower():
+                    agg = "SUM" if is_numeric else None
+                    entry = (col.name, st.schema.name, agg)
+                    if entry not in alias_map.setdefault(kw, []):
+                        alias_map[kw].append(entry)
+
+    return alias_map

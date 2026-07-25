@@ -27,11 +27,12 @@ class Scheduler:
         replan_callback: Callable | None = None,
         retriever: Retriever | None = None,
         all_schemas: list | None = None,
+        alias_map: dict[str, list[tuple[str, str, str | None]]] | None = None,
     ):
         self.llm = llm
         self.executor = executor
         self.config = config
-        self.agent = agent or RLMAgent(llm, executor, config, retriever=retriever, all_schemas=all_schemas)
+        self.agent = agent or RLMAgent(llm, executor, config, retriever=retriever, all_schemas=all_schemas, alias_map=alias_map)
         if compressed_schemas is not None:
             self.agent.set_compressed_schemas(compressed_schemas)
         self.replan_callback = replan_callback

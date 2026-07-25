@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 import re
@@ -12,28 +14,38 @@ from syrch.search.calibrator import ExecutionSignals, calibrate
 from syrch.search.clarify import compute_ambiguity_score
 from syrch.search.retriever import Retriever
 
-RLM_SYSTEM = """You are a search agent working inside a SQL query environment.
-You have access to:
-- A database with the following tables:
-{schema}
-- The executor to run SQL queries
-- Previous sub-task results as variables (e.g., result_A, result_B, etc.)
+logger = logging.getLogger(__name__)
 
-Your task:
-{task_description}
+RLM_SYSTEM = """You are a constraint-based SQL generator.
+
+CRITICAL RULES — Follow ALL:
+
+1. USE ONLY COLUMNS SHOWN IN THE SCHEMA BELOW. Never invent column names.
+   Map business terms (e.g. "revenue" → total_amount, "items" → quantity)
+   to physical column names. Never use a business term as a column name directly.
+
+2. Aggregate/metric questions MUST include GROUP BY. If the question asks for
+   total, average, sum, count, per, by, or a metric column, use aggregation
+   functions + GROUP BY. Never return raw rows for an aggregate question.
+
+3. Time-filtered questions MUST include WHERE on a date/time column. If the
+   question mentions a year, month, quarter, date range, trend, or "recent",
+   add a date filter condition.
+
+4. SCD2 tables (having valid_from, valid_to columns): always filter by
+   valid_from <= reference_date AND (valid_to > reference_date OR valid_to IS NULL).
+
+5. Prefer hint_columns and metric_columns over other columns. These are the
+   columns most likely to answer the question correctly.
 
 {hint_section}
-For each attempt, produce a SQL query that:
-1. Constructs a SQL query addressing the task
-2. Stores the result in a variable
+Available tables:
+{schema}
 
-After each attempt, output a confidence score between 0.0 and 1.0.
+Task: {task_description}
 
-When you are satisfied, output FINAL(result_var_name) to submit your answer.
-
-IMPORTANT: You MUST end your response with "Confidence: <0.0-1.0>" on its own line.
-Do NOT forget the confidence line. A confidence of 1.0 means absolutely certain.
-"""
+Output your SQL query, then end with "Confidence: <0.0-1.0>" on its own line.
+When satisfied, output FINAL(result_var_name)."""
 
 
 class RLMAgent:
@@ -46,12 +58,14 @@ class RLMAgent:
         config: ExecutionConfig,
         retriever: Retriever | None = None,
         all_schemas: list | None = None,
+        alias_map: dict[str, list[tuple[str, str, str | None]]] | None = None,
     ):
         self.llm = llm
         self.executor = executor
         self.config = config
         self.retriever = retriever
         self.all_schemas = all_schemas
+        self.alias_map = alias_map or {}
         self._compressed_schemas: list | None = None
 
     def set_compressed_schemas(self, schemas: list | None) -> None:
@@ -92,13 +106,27 @@ class RLMAgent:
         cols.add("*")
         return cols
 
-    @staticmethod
-    def _build_hint_section(node: TaskNode) -> str:
+    def _build_hint_section(self, node: TaskNode) -> str:
         parts: list[str] = []
         if node.hint_tables:
-            parts.append("Recommended tables (strongly prefer these): " + ", ".join(node.hint_tables))
+            parts.append("Recommended tables: " + ", ".join(node.hint_tables))
         if node.hint_columns:
-            parts.append("Planner hint — columns you may need (verify actual names): " + ", ".join(node.hint_columns))
+            parts.append("Prefer these columns: " + ", ".join(node.hint_columns))
+        if node.metric_columns:
+            parts.append("Metric columns (use these for aggregation): " + ", ".join(node.metric_columns))
+        if node.grain:
+            parts.append("Row granularity: " + node.grain)
+        if node.time_columns:
+            parts.append("Time columns for date filtering: " + ", ".join(node.time_columns))
+        if self.alias_map:
+            alias_lines: list[str] = []
+            for term, mappings in sorted(self.alias_map.items()):
+                cols_str = "; ".join(
+                    f"{agg}({col}) in {tbl}" if agg else f"{col} in {tbl}"
+                    for col, tbl, agg in mappings
+                )
+                alias_lines.append(f"  {term} → {cols_str}")
+            parts.append("ALIAS MAP — Business terms → physical columns:\n" + "\n".join(alias_lines))
         if parts:
             return "\n".join(parts) + "\n"
         return ""
@@ -161,6 +189,12 @@ class RLMAgent:
                     )
                 continue
 
+            if self.config.verbose:
+                logger.info(
+                    "  [%s#%d] SQL (%d chars): %s",
+                    node.id, attempt, len(sql), sql[:400],
+                )
+
             path = ReasoningPath(
                 path_id=f"{node.id}-{attempt}",
                 sql=sql,
@@ -190,6 +224,15 @@ class RLMAgent:
                     f"SQL semantic error: {schema_error}\n\n"
                     f"Fix the query and try again."
                 )
+                continue
+
+            col_selection = self._validate_column_selection(sql, node)
+            if col_selection:
+                signals.quality_warnings.append(col_selection)
+                paths.append(path)
+                if best_path is None or confidence > best_path.confidence:
+                    best_path = path
+                user_prompt = f"{col_selection}\n\nTry again."
                 continue
 
             try:
@@ -235,11 +278,19 @@ class RLMAgent:
                 signals.quality_warnings.append(quality_feedback)
                 if "0 rows" in quality_feedback:
                     signals.had_empty_result = True
-                if "all NULL" in quality_feedback:
+                    diagnosis = self._diagnose_empty_result(sql, node)
+                    if diagnosis:
+                        user_prompt = f"{quality_feedback}\n{diagnosis}\n\nFix the issue and try again."
+                    else:
+                        user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
+                elif "all NULL" in quality_feedback:
                     signals.had_null_columns = True
-                if f"{self.MAX_ROWS_WARNING}" in quality_feedback:
+                    user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
+                elif f"{self.MAX_ROWS_WARNING}" in quality_feedback:
                     signals.had_overflow_result = True
-                user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
+                    user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
+                else:
+                    user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
                 continue
 
             semantic_feedback = self._check_semantic_match(data, sql, node)
@@ -329,6 +380,38 @@ class RLMAgent:
 
         return None
 
+    def _validate_column_selection(self, sql: str, node: TaskNode) -> str | None:
+        from sqlglot import parse_one
+        from sqlglot.expressions import Column
+
+        expected: set[str] = set()
+        if node.hint_columns:
+            expected.update(c.lower() for c in node.hint_columns)
+        if node.metric_columns:
+            expected.update(c.lower() for c in node.metric_columns)
+        if not expected:
+            return None
+
+        try:
+            tree = parse_one(sql)
+        except Exception:
+            return None
+
+        used = set()
+        for col in tree.find_all(Column):
+            name = col.name.lower()
+            if name != "*" and not name.startswith("result_"):
+                used.add(name)
+
+        overlap = used & expected
+        if not overlap and used:
+            return (
+                f"Column selection issue: SQL uses columns {sorted(used)} "
+                f"but preferred columns are {sorted(expected)}. "
+                f"Use at least one of the preferred columns."
+            )
+        return None
+
     def _check_result_quality(self, data: pd.DataFrame) -> str | None:
         if data.empty:
             return "WARNING: Query returned 0 rows. The result may be empty."
@@ -343,6 +426,61 @@ class RLMAgent:
                 f"NOTE: Query returned {len(data)} rows. "
                 f"Consider adding LIMIT or aggregation."
             )
+        return None
+
+    def _diagnose_empty_result(self, sql: str, node: TaskNode) -> str | None:
+        sql_upper = sql.upper()
+        findings: list[str] = []
+
+        if "WHERE" in sql_upper:
+            if node.time_columns:
+                date_cols = [c.lower() for c in node.time_columns]
+                has_date_where = any(c in sql_upper for c in date_cols)
+                if not has_date_where:
+                    findings.append(
+                        f"Question has time context but WHERE does not filter on date columns {node.time_columns}"
+                    )
+
+            if node.hint_columns:
+                from sqlglot import parse_one
+                from sqlglot.expressions import Column
+
+                try:
+                    tree = parse_one(sql)
+                    used = {c.name.lower() for c in tree.find_all(Column)}
+                    hinted = set(c.lower() for c in node.hint_columns)
+                    if used and not (used & hinted):
+                        findings.append(
+                            f"SQL uses columns {used - {'*'}} but none match "
+                            f"recommended columns {node.hint_columns}. "
+                            f"Try using these columns instead."
+                        )
+                except Exception:
+                    pass
+        else:
+            if node.time_columns:
+                findings.append(
+                    f"Question has time context but SQL lacks a WHERE clause. "
+                    f"Add WHERE filtering on date columns {node.time_columns}."
+                )
+
+        has_aggregation = any(kw in sql_upper for kw in ["COUNT(", "SUM(", "AVG("])
+        question_lower = node.description.lower()
+        aggregate_keywords = ["total", "average", "sum", "count", "per", "by"]
+        if any(kw in question_lower for kw in aggregate_keywords):
+            if not has_aggregation:
+                findings.append(
+                    "Question asks for aggregation but SQL has no aggregate function. "
+                    "Use SUM(), COUNT(), or AVG()."
+                )
+            elif "GROUP BY" not in sql_upper:
+                findings.append(
+                    "Aggregation used without GROUP BY. "
+                    "Add GROUP BY for the dimension columns."
+                )
+
+        if findings:
+            return "Diagnosis of 0-row result:\n- " + "\n- ".join(findings)
         return None
 
     def _check_semantic_match(
@@ -362,11 +500,21 @@ class RLMAgent:
                     f"expected hint columns {node.hint_columns}"
                 )
 
+        if node.metric_columns:
+            metric = set(c.lower() for c in node.metric_columns)
+            overlap = result_cols & metric
+            if not overlap:
+                return (
+                    f"Result columns {list(data.columns)} do not include "
+                    f"expected metric columns {node.metric_columns}"
+                )
+
         sql_upper = sql.upper()
         has_group_by = "GROUP BY" in sql_upper
         has_aggregation = any(
             kw in sql_upper for kw in ["COUNT(", "SUM(", "AVG(", "MIN(", "MAX("]
         )
+        question_lower = node.description.lower()
 
         if has_group_by and len(data) == 1:
             return (
@@ -374,11 +522,49 @@ class RLMAgent:
                 "Expected multiple rows for grouped result."
             )
 
-        if has_aggregation and not has_group_by and len(data) == 1 and data.isna().all(axis=None) is False:
-            pass
+        time_keywords = ["year", "month", "quarter", "date", "trend", "recent",
+                         "over time", "daily", "weekly", "monthly", "annually",
+                         "since", "between", "from", "to", "last"]
+        if any(kw in question_lower for kw in time_keywords):
+            date_cols = node.time_columns or []
+            if not date_cols:
+                if self._compressed_schemas:
+                    for s in self._compressed_schemas:
+                        for c in s.columns:
+                            if any(t in c.name.lower() for t in ["date", "time", "_at", "timestamp"]):
+                                date_cols.append(c.name)
+            if date_cols:
+                has_date_where = any(
+                    c.lower() in sql_upper for c in date_cols
+                    if "WHERE" in sql_upper
+                )
+                if not has_date_where:
+                    return (
+                        f"Question mentions time ({[kw for kw in time_keywords if kw in question_lower][:3]}) "
+                        f"but SQL has no WHERE condition on date columns {date_cols}. "
+                        f"Add a date filter."
+                    )
+
+        aggregate_phrases = ["total", "average", "sum", "count", "per", "by",
+                             "aggregate", "metric", "trend", "overall"]
+        is_aggregate_question = any(
+            p in question_lower for p in aggregate_phrases
+        ) or bool(node.metric_columns)
+
+        if is_aggregate_question and has_aggregation and not has_group_by:
+            return (
+                "Question asks for an aggregate/metric but SQL uses aggregation "
+                "without GROUP BY. Add GROUP BY for the dimension columns."
+            )
+
+        if is_aggregate_question and not has_aggregation and not has_group_by:
+            if len(data) > 3:
+                return (
+                    f"Question expects aggregation but query returned {len(data)} raw rows. "
+                    f"Use aggregation functions (SUM, COUNT, AVG) with GROUP BY."
+                )
 
         if not has_group_by and not has_aggregation and len(data) > 3:
-            question_lower = node.description.lower()
             singular_phrases = ["what is", "what's", "how many", "how much", "total", "average"]
             if any(p in question_lower for p in singular_phrases):
                 return (
@@ -386,6 +572,21 @@ class RLMAgent:
                     f"but query returned {len(data)} rows. "
                     f"Add aggregation without GROUP BY or use LIMIT."
                 )
+
+        if any(p in sql_upper for p in ["valid_from", "valid_to"]):
+            pass
+        elif any(p in question_lower for p in ["as of", "point in time",
+                                                "current", "snapshot"]):
+            if self._compressed_schemas:
+                has_scd2 = any(
+                    any(c.name.lower() in ("valid_from", "valid_to") for c in s.columns)
+                    for s in self._compressed_schemas
+                )
+                if has_scd2 and "valid_from" not in sql_upper:
+                    return (
+                        "SCD2 tables detected but SQL does not filter by "
+                        "valid_from/valid_to. Add temporal filtering."
+                    )
 
         return None
 

@@ -34,6 +34,8 @@ class ScoredSchemaEvidence:
     grain_hints: list[str] = field(default_factory=list)
     metric_hints: list[str] = field(default_factory=list)
     time_columns: list[str] = field(default_factory=list)
+    alias_map: dict[str, list[tuple[str, str, str | None]]] = field(default_factory=dict)
+    # {business_term: [(physical_column, table_name, suggested_agg), ...]}
     all_schemas: list[TableSchema] = field(default_factory=list)
 
 
@@ -69,6 +71,9 @@ class TaskNode:
     join_keys: list[JoinKey] | None = None
     hint_tables: list[str] | None = None
     hint_columns: list[str] | None = None
+    metric_columns: list[str] | None = None
+    grain: str | None = None
+    time_columns: list[str] | None = None
     _children: list[str] | None = None
 
     def __hash__(self) -> int:

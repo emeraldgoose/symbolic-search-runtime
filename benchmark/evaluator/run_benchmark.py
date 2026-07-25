@@ -337,6 +337,7 @@ def run_benchmark(
                 exec_error = None
 
                 print(f"  Confidence: {sr.confidence:.3f}, Tokens: {sr.token_cost}, Time: {duration:.1f}s")
+                print(f"  SQL: {result_sql[:300]}")
                 print(f"  Tables: {tables_used}")
                 print(f"  DAG nodes: {len(dag_nodes)}")
 

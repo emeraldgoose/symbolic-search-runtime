@@ -25,8 +25,14 @@ Rules:
 - Non-atomic sub-tasks will be further decomposed recursively (up to max_depth).
 - Sub-tasks must be MECE (Mutually Exclusive, Collectively Exhaustive)
 - Every sub-task must have: id, description, depends_on, is_atomic, expected_output.
-- VERY IMPORTANT: For each sub-task, specify hint_tables (the database table(s) most likely to contain the needed data). This is a list of table names. Be specific.
-- If you know which columns are needed, also specify hint_columns (optional, as a hint only — the SQL generator will verify).
+
+SEMANTIC SLOTS (fill these for every sub-task):
+- hint_tables (REQUIRED): the database table(s) most likely to contain the needed data. Be specific.
+- hint_columns (optional): columns you anticipate needing. The SQL generator will verify actual names.
+- metric_columns (optional): columns containing numerical measures/metrics (e.g. "total_amount", "revenue", "count").
+- grain (optional): row-level granularity — e.g. "per order", "daily", "per customer", "monthly", "per product".
+- time_columns (optional): date/time columns relevant to the question's time filter or trend.
+
 - If a sub-task depends on another and their results should be joined by column,
   specify join_keys. Each join_key has: left, left_col, right, right_col, how.
   Example: "join_keys": [{{"left": "B", "left_col": "customer_id",
@@ -42,7 +48,10 @@ Output a JSON object with:
       "is_atomic": true,
       "expected_output": "what data this sub-task produces",
       "hint_tables": ["table_name"],
-      "hint_columns": ["column_name"]
+      "hint_columns": ["column_name"],
+      "metric_columns": ["amount", "revenue"],
+      "grain": "per order",
+      "time_columns": ["order_date"]
     }}
   ]
 }}
@@ -129,6 +138,11 @@ class Planner:
             hint_tables: list[str] | None = [t for t in hint_tables_raw if isinstance(t, str)] if isinstance(hint_tables_raw, list) else None
             hint_columns_raw = item.get("hint_columns", [])
             hint_columns: list[str] | None = [c for c in hint_columns_raw if isinstance(c, str)] if isinstance(hint_columns_raw, list) else None
+            metric_columns_raw = item.get("metric_columns", [])
+            metric_columns: list[str] | None = [c for c in metric_columns_raw if isinstance(c, str)] if isinstance(metric_columns_raw, list) else None
+            grain: str | None = item.get("grain") if isinstance(item.get("grain"), str) else None
+            time_columns_raw = item.get("time_columns", [])
+            time_columns: list[str] | None = [c for c in time_columns_raw if isinstance(c, str)] if isinstance(time_columns_raw, list) else None
 
             node = TaskNode(
                 id=node_id,
@@ -140,6 +154,9 @@ class Planner:
                 join_keys=join_keys,
                 hint_tables=hint_tables,
                 hint_columns=hint_columns,
+                metric_columns=metric_columns,
+                grain=grain,
+                time_columns=time_columns,
             )
             nodes[node.id] = node
         if not nodes:

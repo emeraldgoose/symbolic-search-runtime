@@ -91,6 +91,7 @@ def run_pipeline(
         replan_callback=_on_replan,
         retriever=retriever,
         all_schemas=all_schemas_list,
+        alias_map=evidence.alias_map if problem.evidence else None,
     )
     results = scheduler.run(dag)
     aggregator = Aggregator(llm, executor, config)
