@@ -18,6 +18,13 @@ benchmark_delta/
 *.sqlite
 *.db
 
+# But allow benchmark-generated data (deterministic, small)
+!benchmark/generated/answers/**/*.csv
+!benchmark/generated/answers/**/*.json
+
+# Benchmark SQLite is too large (>100MB) — regenerate via generator
+benchmark/generated/sqlite/
+
 # OS
 .DS_Store
 

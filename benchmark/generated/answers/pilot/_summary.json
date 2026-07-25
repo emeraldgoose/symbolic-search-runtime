@@ -1,0 +1,133 @@
+[
+  {
+    "id": "S1",
+    "rows": 1,
+    "columns": [
+      "total_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S1.csv"
+  },
+  {
+    "id": "S2",
+    "rows": 1,
+    "columns": [
+      "net_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S2.csv"
+  },
+  {
+    "id": "S3",
+    "rows": 1,
+    "columns": [
+      "vip_net_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S3.csv"
+  },
+  {
+    "id": "S4",
+    "rows": 1,
+    "columns": [
+      "paid_vip_net_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S4.csv"
+  },
+  {
+    "id": "S5",
+    "rows": 12,
+    "columns": [
+      "sale_month",
+      "total_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S5.csv"
+  },
+  {
+    "id": "S6",
+    "rows": 1,
+    "columns": [
+      "avg_fulfillment_days"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S6.csv"
+  },
+  {
+    "id": "S7",
+    "rows": 1,
+    "columns": [
+      "conversion_rate"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S7.csv"
+  },
+  {
+    "id": "S8",
+    "rows": 1,
+    "columns": [
+      "marketing_cost_ratio"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S8.csv"
+  },
+  {
+    "id": "S9",
+    "rows": 1,
+    "columns": [
+      "repeat_purchase_rate"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S9.csv"
+  },
+  {
+    "id": "S10",
+    "rows": 2,
+    "columns": [
+      "month",
+      "items_sold",
+      "prev_items_sold",
+      "difference"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S10.csv"
+  },
+  {
+    "id": "S11",
+    "rows": 4,
+    "columns": [
+      "segment",
+      "churn_rate"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S11.csv"
+  },
+  {
+    "id": "S12",
+    "rows": 2,
+    "columns": [
+      "year",
+      "revenue",
+      "prev_revenue",
+      "yoy_growth"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S12.csv"
+  },
+  {
+    "id": "S13",
+    "rows": 5,
+    "columns": [
+      "category_name",
+      "total_revenue"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S13.csv"
+  },
+  {
+    "id": "S14",
+    "rows": 1,
+    "columns": [
+      "status",
+      "refund_count",
+      "total_refund_amount"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S14.csv"
+  },
+  {
+    "id": "S15",
+    "rows": 1,
+    "columns": [
+      "avg_daily_revenue_excl_holidays"
+    ],
+    "path": "/Users/minseongkim/Documents/workspace/symbolic-search-runtime/benchmark/generated/answers/pilot/S15.csv"
+  }
+]

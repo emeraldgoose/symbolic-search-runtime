@@ -14,7 +14,7 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **RLM (Recursive Language Model)**: Each sub-task runs its own REPL loop — generate code → validate syntax → validate schema → execute SQL → check quality → evaluate confidence → refine or stop. Multiple reasoning paths are explored per node.
 - **Confidence Calibration**: LLM self-assessed confidence is discounted by execution signals (retries, errors, empty results) for more reliable scoring.
 - **Grid Search**: Systematic hyperparameter testing (`max_depth`, `high_confidence`, `max_attempts`, `calibration_enabled`) to find optimal configs.
-- **Multi-table Schema**: Planner and RLM see all database tables, not just one.
+- **Multi-table Schema**: Retriever scores all tables by relevance, Planner selects per subtask, and RLM sees only compressed schema (2-5 tables, not all 31).
 - **Search over reasoning, not execution**: D&C splits the *problem space*, not the SQL. Each sub-problem is a complete reasoning unit (think → code → validate → execute → evaluate).
 - **Pluggable Executors**: Abstract `BaseExecutor` with SQLite, JDBC, and Databricks implementations — PEP 249 compatible.
 
@@ -24,32 +24,52 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 User Question
     │
     ▼
-┌──────────────────┐
-│    Planner       │  ← LLM decomposes question into sub-task DAG
-│  (D&C)           │     (depends_on, is_atomic, expected_output)
-│                  │     Multi-table schema: all tables visible
-└──────┬───────────┘
-       │ TaskDAG (topo_layers)
-       ▼
-┌──────────────────┐
-│    Scheduler     │  ← Layer-by-layer DAG execution
-│                   │
-│  For each node:   │
-│  ┌─────────────┐  │
-│  │ RLM Agent    │  │  ← 5-step validation loop:
-│  │ 1. SQLGlot   │  │     1. Syntax check (sqlglot.parse_one)
-│  │    syntax    │  │     2. Schema AST check (valid columns)
-│  │ 2. Schema    │  │     3. Execute SQL
-│  │    AST check │  │     4. Quality check (row count, nulls)
-│  │ 3. Execute   │  │     5. Confidence calibration applied
-│  │ 4. Quality   │  │
-│  │ 5. Calibrate │  │
-│  └─────────────┘  │
-│                   │
-│  Pruning:          │
+┌──────────────────────┐
+│    Retriever         │  ← Keyword scoring over all tables
+│  (keyword match)     │     outputs scored_schemas (no fixed K)
+│  + match_reason      │
+└─────────┬────────────┘
+          │ scored_schemas (score + reason per table)
+          ▼
+┌──────────────────────┐
+│  Schema-aware        │  ← LLM decomposes + selects tables
+│  Planner (D&C)       │     hint_tables: strong constraint
+│                      │     hint_columns: soft hint (verify)
+│                      │     L1 depth auto-limited to 2
+└─────────┬────────────┘
+          │ DAG + hints per subtask
+          ▼
+┌──────────────────────┐
+│  Semantic Clarifier  │  ← Pre-execution ambiguity detection
+│  (Question + DAG)    │     uses Planner output for deeper analysis
+│  interactive only    │
+└─────────┬────────────┘
+          │ (or skip if clear)
+          ▼
+┌──────────────────────┐
+│  Schema Compression  │  ← Extract only hint_tables schemas
+│                      │     RLM sees 2-5 tables, not all 31
+└─────────┬────────────┘
+          │ compressed schemas
+          ▼
+┌──────────────────────┐
+│    Scheduler         │  ← Layer-by-layer DAG execution
+│                      │     recoverable error → RLM retry
+│  For each node:      │     structural error → Planner.replan()
+│  ┌──────────────┐   │
+│  │ RLM Agent    │   │  ← 5-step validation loop:
+│  │ 1. Syntax    │   │     1. SQLGlot syntax check
+│  │ 2. Schema    │   │     2. Schema AST check
+│  │ 3. Execute   │   │     3. Execute SQL
+│  │ 4. Quality   │   │     4. Quality check
+│  │ 5. Calibrate │   │     5. Confidence calibration
+│  └──────────────┘   │
+│                     │
+│  replan_request ────→ Planner.replan(dag, node, error, trace)
+│                     │   → updated DAG → recompress → continue
+│  Pruning:            │
 │  conf ≥ threshold → greedy stop
-│  max_attempts hit → best path selected
-└──────┬───────────┘
+└──────┬───────────────┘
        │ NodeResults (DataFrames + SQL + confidence)
        ▼
 ┌──────────────────┐
@@ -59,26 +79,6 @@ User Question
        │ FinalSolution
        ▼
  Optimal Answer + SQL + Reasoning Trace
-
- ═══════ Optional: RLM Clarification ═══════
-       │
-       ▼ (if --interactive)
-┌──────────────────┐
-│  RLM Clarifier   │  ← RLM exhaustion detected
-│                   │     ambiguity score >= threshold
-│  Node-level:      │     → ask user question
-│  ┌─────────────┐  │     → refine ProblemSpec
-│  │ no_sql       │  │     → re-run pipeline
-│  │ empty_result │  │
-│  │ quality_fail │  │
-│  │ low_confidence│  │
-│  └─────────────┘  │
-└──────┬───────────┘
-       │ Clarification answer → refined problem
-       ▼
-     Back to Planner (retry)
-
- ═══════ Optional: Grid Search ═══════
        │
        ▼
 ┌──────────────────┐

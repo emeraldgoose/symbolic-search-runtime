@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Any
 
 import pandas as pd
 
@@ -24,6 +25,8 @@ def _is_session_expired(exception: Exception) -> bool:
 
 
 class SparkExecutor(BaseExecutor):
+    _spark: Any
+
     def __init__(
         self,
         catalog: str | None = None,
@@ -33,7 +36,7 @@ class SparkExecutor(BaseExecutor):
         self._catalog = catalog or os.getenv("SPARK_CATALOG")
         self._schema_name = schema or os.getenv("SPARK_SCHEMA")
         self._tables = tables or []
-        self._spark = None
+        self._spark = None  # type: ignore[assignment]
         self._ensure_session()
 
     def _ensure_session(self):

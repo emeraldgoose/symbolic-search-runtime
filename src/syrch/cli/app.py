@@ -158,32 +158,14 @@ def search(
         console.print(f"[red]Error connecting to database: {e}[/red]")
         raise typer.Exit(1)
 
-    from syrch.search.clarify import find_worst_ambiguity, generate_question
+    def _ask_user(question: str) -> str:
+        return console.input(f"\n[bold yellow]?[/bold yellow] {question}\n> ")
 
     spec = ProblemSpec(question=question, schema=schema)
-    clarification_qa: list[tuple[str, str]] = []
+    user_callback = _ask_user if interactive else None
 
-    for _ in range(2):
-        with console.status("[bold green]Planning decomposition...[/bold green]"):
-            solution, dag, _results = run_pipeline(llm, db_executor, config, spec)
-
-        worst = find_worst_ambiguity(_results)
-        if not (interactive and worst and worst[1] > config.ambiguity_threshold):
-            break
-
-        worst_id, worst_score = worst
-        q = generate_question(llm, spec, dag, worst_id, _results)
-        answer = console.input(f"\n[bold yellow]?[/bold yellow] {q}\n> ")
-        clarification_qa.append((q, answer))
-
-        spec = ProblemSpec(
-            question=f"{spec.question}\n[User clarification: {answer}]",
-            schema=schema,
-            all_schemas=spec.all_schemas,
-        )
-
-    solution.clarification_qa = clarification_qa
-    solution.clarified = bool(clarification_qa)
+    with console.status("[bold green]Planning decomposition...[/bold green]"):
+        solution, dag, _results = run_pipeline(llm, db_executor, config, spec, user_callback=user_callback)
 
     if verbose:
         _show_plan(dag)

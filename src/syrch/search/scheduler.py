@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from syrch.core.config import ExecutionConfig
 from syrch.core.models import NodeResult, TaskDAG, TaskNode
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
+from syrch.search.planner import compute_layers
 from syrch.search.rlm_engine import RLMAgent
 
 logger = logging.getLogger(__name__)
@@ -20,11 +22,16 @@ class Scheduler:
         executor: BaseExecutor,
         config: ExecutionConfig,
         agent: RLMAgent | None = None,
+        compressed_schemas: list | None = None,
+        replan_callback: Callable | None = None,
     ):
         self.llm = llm
         self.executor = executor
         self.config = config
         self.agent = agent or RLMAgent(llm, executor, config)
+        if compressed_schemas is not None:
+            self.agent.set_compressed_schemas(compressed_schemas)
+        self.replan_callback = replan_callback
         max_expected = config.llm.timeout_seconds * config.max_attempts_per_node
         self.node_timeout = max(max_expected * 2, 300)
 
@@ -86,6 +93,13 @@ class Scheduler:
                         status = "OK" if result.error is None else "FAIL"
                         logger.info("  [%s] %s confidence=%.2f tokens=%d",
                                     node.id, status, result.confidence, result.cost_tokens)
+
+                    # Handle replan request
+                    if self.replan_callback is not None and result.replan_request is not None:
+                        if self.config.verbose:
+                            logger.info("  [%s] replan requested: %s", node.id, result.replan_request[:100])
+                        dag = self.replan_callback(dag, node.id, result)
+                        dag.topo_layers = compute_layers(dag.nodes)
 
                     self._handle_alternative_joins(dag, node, results, consumed)
 
