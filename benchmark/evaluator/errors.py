@@ -10,7 +10,7 @@ into the standard Error Taxonomy:
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -28,8 +28,33 @@ _ERROR_WEIGHTS = {
     "planner_error": 0.15,
     "retriever_error": 0.15,
     "execution_error": 0.30,
+    "alias_only_mismatch": 0.05,
     "unknown": 0.10,
 }
+
+
+def _cell_normalize(v):
+    if pd.isna(v):
+        return "<NULL>"
+    if isinstance(v, (int, float, np.number)):
+        return round(float(v), 6)
+    try:
+        return round(float(v), 6)
+    except (ValueError, TypeError):
+        return str(v).strip()
+
+
+def _data_only_match(df_a: pd.DataFrame, df_b: pd.DataFrame) -> bool:
+    if len(df_a) != len(df_b) or df_a.shape[1] != df_b.shape[1]:
+        return False
+
+    def rows(df):
+        return [
+            tuple(_cell_normalize(v) for v in row)
+            for row in df.itertuples(index=False, name=None)
+        ]
+
+    return Counter(rows(df_a)) == Counter(rows(df_b))
 
 
 def classify(
@@ -89,7 +114,8 @@ def classify(
         try:
             gt_cols = set(ground_truth_df.columns)
             res_cols = set(result_df.columns)
-            if gt_cols != res_cols:
+            has_column_mismatch = (gt_cols != res_cols)
+            if has_column_mismatch:
                 missing_cols = gt_cols - res_cols
                 extra_cols = res_cols - gt_cols
                 detail_parts = []
@@ -112,8 +138,16 @@ def classify(
                         "detail": f"Row count mismatch: expected {gt_rows}, got {res_rows}",
                     })
 
+            data_match = _data_only_match(ground_truth_df, result_df)
+
+            if has_column_mismatch and data_match:
+                errors.append({
+                    "type": "alias_only_mismatch",
+                    "detail": "Columns differ but data values match (alias-only mismatch)",
+                })
+
             if not execution_error and gt_rows > 0 and res_rows > 0:
-                if not _dataframes_tolerant_match(ground_truth_df, result_df):
+                if not data_match and gt_cols == res_cols:
                     errors.append({
                         "type": "wrong_filter",
                         "detail": "Result data mismatch with ground truth",
@@ -267,6 +301,43 @@ def _check_semantic_mapping(question: dict, result_sql: str) -> list[dict]:
                     "detail": f"Semantic concept '{concept}' → expected column '{col_name}' not found in SQL",
                 })
     return errors
+
+
+def classify_outcome(
+    *,
+    question: dict,
+    ground_truth_df: pd.DataFrame | None,
+    result_df: pd.DataFrame | None,
+    result_sql: str,
+    tables_used: list[str],
+    execution_error: str | None,
+) -> str:
+    """Four-way outcome classification.
+
+    - `correct`: executed and data matches ground truth.
+    - `justified_ambiguous`: executed with a defensible alternative source
+      declared by `source_ambiguity.equivalent_tables` — the question is
+      genuinely underdetermined by schema-only evidence.
+    - `wrong`: executed but chose a source/result that is not defensible
+      (or an `incorrect_ambiguous` case where a non-equivalent source was
+      picked despite declared ambiguity).
+    - `failed`: execution error or no SQL produced.
+    """
+    if execution_error or not result_sql or not tables_used:
+        return "failed"
+
+    if ground_truth_df is not None and result_df is not None:
+        if _data_only_match(ground_truth_df, result_df):
+            return "correct"
+
+    src_amb = question.get("source_ambiguity") or {}
+    if src_amb.get("justified"):
+        equiv = {t.lower() for t in src_amb.get("equivalent_tables", [])}
+        used = {t.lower() for t in tables_used}
+        if used and used <= equiv:
+            return "justified_ambiguous"
+
+    return "wrong"
 
 
 def summarize(errors_list: list[list[dict]]) -> dict:

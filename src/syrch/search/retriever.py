@@ -3,11 +3,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from syrch.core.models import ColumnSchema, ScoredSchemaEvidence, ScoredTable, TableSchema
+from syrch.core.models import (
+    CandidateFeatures,
+    CandidatePolicy,
+    ColumnSchema,
+    ScoredSchemaEvidence,
+    ScoredTable,
+    TableSchema,
+)
+from syrch.search.semantic_index import SemanticIndex
 
 
 def _tokenize(text: str) -> set[str]:
-    words = re.findall(r"[a-zA-Z0-9_]\w*", text.lower())
+    raw_words = re.findall(r"[a-zA-Z0-9]+(?:[_\-][a-zA-Z0-9]+)*", text.lower())
     stopwords = {
         "the", "a", "an", "is", "are", "was", "were", "be", "been",
         "in", "on", "at", "of", "for", "to", "by", "with", "from",
@@ -15,7 +23,15 @@ def _tokenize(text: str) -> set[str]:
         "show", "give", "find", "get", "list", "calculate", "compute",
         "do", "does", "did", "has", "have", "had",
     }
-    return {w for w in words if w not in stopwords and len(w) > 1}
+    words: set[str] = set()
+    for w in raw_words:
+        parts = re.split(r"[_\-]", w)
+        for part in parts:
+            if part not in stopwords and len(part) > 1:
+                words.add(part)
+        if w not in stopwords and len(w) > 1:
+            words.add(w)
+    return words
 
 
 _GRAIN_KEYWORDS = {
@@ -38,6 +54,44 @@ _METRIC_KEYWORDS = {
     "profit": "profit", "margin": "profit",
     "discount": "discount", "refund": "refund",
     "price": "price", "rate": "rate",
+    "inventory": "inventory", "stock": "inventory",
+}
+
+_COLUMN_SYNONYMS: dict[str, set[str]] = {
+    "inventory": {"items", "stock"},
+    "payment": {"paid"},
+    "delivery": {"shipped"},
+    "fulfillment": {"shipped", "paid", "delivery"},
+    "salary": {"compensation"},
+    "employee": {"staff"},
+    "churn": {"inactive"},
+}
+
+
+def _stem(word: str) -> str:
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith("ves") and len(word) > 4:
+        return word[:-3] + "f"
+    if word.endswith("es") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        return word[:-1]
+    return word
+
+_GRAIN_TO_LAYER: dict[str, str] = {
+    "daily": "mart", "monthly": "mart", "weekly": "mart", "trend": "mart",
+    "day": "mart", "month": "mart", "week": "mart", "year": "mart",
+    "quarter": "mart", "hour": "mart",
+    "order": "dw", "customer": "dw", "product": "dw", "employee": "dw",
+    "event": "fact", "session": "fact", "click": "fact", "impression": "fact",
+    "category": "dim", "segment": "dim", "region": "dim",
+    "ranking": "rpt",
+}
+
+_LAYER_PENALTY: dict[str, float] = {
+    "staging": -0.5, "legacy": -0.5,
+    "config": -1.0, "audit": -1.0, "archive": -0.5,
 }
 
 
@@ -49,6 +103,7 @@ class SchemaIndex:
     entity_keys: list[str] = field(default_factory=list)
     time_columns: dict[str, list[ColumnSchema]] = field(default_factory=dict)
     description_tokens: dict[str, set[str]] = field(default_factory=dict)
+    table_to_layer: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def build(cls, schemas: list[TableSchema]) -> SchemaIndex:
@@ -58,9 +113,11 @@ class SchemaIndex:
         entity_keys: list[str] = []
         time_cols: dict[str, list[ColumnSchema]] = {}
         desc_tokens: dict[str, set[str]] = {}
+        table_to_layer: dict[str, str] = {}
 
         for s in schemas:
             tables[s.name] = s
+            table_to_layer[s.name] = s.layer
             numeric_cols[s.name] = []
             time_cols[s.name] = []
             for c in s.columns:
@@ -84,18 +141,21 @@ class SchemaIndex:
             entity_keys=sorted(set(entity_keys)),
             time_columns=time_cols,
             description_tokens=desc_tokens,
+            table_to_layer=table_to_layer,
         )
 
 
 class Retriever:
-    def __init__(self, schemas: list[TableSchema]):
+    def __init__(
+        self,
+        schemas: list[TableSchema],
+        policy: CandidatePolicy | None = None,
+        semantic_index: SemanticIndex | None = None,
+    ):
         self.index = SchemaIndex.build(schemas)
         self.all_schemas = schemas
-
-    @classmethod
-    def from_executor(cls, executor) -> Retriever:
-        schemas = [executor.get_schema(t) for t in executor.list_tables()]
-        return cls(schemas)
+        self.policy = policy or CandidatePolicy()
+        self.semantic_index = semantic_index
 
     def score(
         self,
@@ -112,18 +172,26 @@ class Retriever:
 
         if not keywords:
             return ScoredSchemaEvidence(
-                matched_tables=[
+                candidates=[
                     ScoredTable(schema=s, score=0.5, match_reasons=["no keywords extracted"])
                     for s in target_schemas
                 ],
                 all_schemas=self.all_schemas,
             )
 
-        matched_tables: list[ScoredTable] = []
-        matched_columns: set[str] = set()
-        found_grain: set[str] = set()
+        candidates: list[ScoredTable] = []
+        matched_columns_set: set[str] = set()
         found_metrics: set[str] = set()
         found_time_cols: list[str] = []
+
+        grain_hints: set[str] = set()
+        for kw in keywords:
+            grain = _GRAIN_KEYWORDS.get(kw)
+            if grain:
+                grain_hints.add(grain)
+            metric = _METRIC_KEYWORDS.get(kw)
+            if metric:
+                found_metrics.add(metric)
 
         for schema in target_schemas:
             total = 0.0
@@ -133,47 +201,47 @@ class Retriever:
             total += s
             reasons.extend(r)
 
-            s, r, matched, metrics, time_cols = _column_score(
+            s, r, matched_col_names, metrics, time_cols = _column_score(
                 keywords, schema.columns, self.index
             )
             total += s
             reasons.extend(r)
-            matched_columns.update(matched)
-            found_metrics.update(metrics)
-            found_time_cols.extend(
-                f"{schema.name}.{c}" for c in time_cols
-            )
+            matched_columns_set.update(matched_col_names)
+            found_time_cols.extend(f"{schema.name}.{c}" for c in time_cols)
+
+            if self.semantic_index and not self.semantic_index.is_empty:
+                s, r, semantic_cols = _semantic_score(keywords, schema, self.semantic_index)
+                total += s
+                reasons.extend(r)
+                matched_columns_set.update(semantic_cols)
 
             s, r = _description_score(keywords, schema, self.index)
             total += s
             reasons.extend(r)
 
-            matched_tables.append(ScoredTable(
+            features = _build_features(keywords, schema, matched_col_names, metrics, grain_hints)
+            total = _apply_layer_adjustment(total, schema.layer, grain_hints, reasons)
+
+            candidates.append(ScoredTable(
                 schema=schema,
                 score=round(total, 2),
                 match_reasons=reasons[:5],
+                features=features,
             ))
 
-        matched_tables.sort(key=lambda x: -x.score)
+        candidates.sort(key=lambda x: -x.score)
+        candidates = self.policy.filter(candidates)
 
-        for kw in keywords:
-            grain = _GRAIN_KEYWORDS.get(kw)
-            if grain:
-                found_grain.add(grain)
-            metric = _METRIC_KEYWORDS.get(kw)
-            if metric:
-                found_metrics.add(metric)
-
-        alias_map = _build_alias_map(keywords, matched_tables)
+        alias_map = _build_alias_map(keywords, candidates)
 
         return ScoredSchemaEvidence(
-            matched_tables=matched_tables,
+            candidates=candidates,
             matched_columns=[
                 col for name, col in _resolve_matched_columns(
-                    matched_columns, self.index
+                    matched_columns_set, self.index
                 )
             ],
-            grain_hints=sorted(found_grain),
+            grain_hints=sorted(grain_hints),
             metric_hints=sorted(found_metrics),
             time_columns=sorted(set(found_time_cols)),
             alias_map=alias_map,
@@ -185,6 +253,8 @@ def _table_name_score(keywords: set[str], table_name: str) -> tuple[float, list[
     name_lower = table_name.lower()
     name_parts = set(name_lower.split("_"))
     matched = keywords & name_parts
+    if not matched:
+        matched = {k for k in keywords if _stem(k) in name_parts}
     if matched:
         ratio = len(matched) / max(len(name_parts), 1)
         reasons = [f"table name matched '{m}' (boost +{ratio * 3.0:.1f})" for m in matched]
@@ -229,6 +299,21 @@ def _column_score(
                 matched_cols.add(col)
                 reasons.append(f"column part '{kw}' in '{col}' (boost +2.0)")
                 break
+            if _stem(kw) in col.split("_"):
+                score += 2.0
+                matched_cols.add(col)
+                reasons.append(f"column part '{_stem(kw)}' (stem of '{kw}') in '{col}' (boost +2.0)")
+                break
+        else:
+            synonyms = _COLUMN_SYNONYMS.get(kw, set())
+            if synonyms:
+                for col in col_full_names:
+                    col_parts = set(col.split("_"))
+                    if synonyms & col_parts:
+                        score += 1.0
+                        matched_cols.add(col)
+                        reasons.append(f"synonym '{kw}'→{synonyms} matched '{col}' (boost +1.0)")
+                        break
 
     type_match = keywords & col_types
     score += len(type_match) * 0.5
@@ -250,6 +335,76 @@ def _column_score(
             metrics.add(metric)
 
     return score, reasons, matched_cols, metrics, time_cols
+
+
+def _build_features(
+    keywords: set[str],
+    schema: TableSchema,
+    matched_col_names: set[str],
+    metrics: set[str],
+    grain_hints: set[str],
+) -> CandidateFeatures:
+    matched_kw: list[str] = []
+    matched_cols_list: list[str] = []
+    matched_descs: list[str] = []
+
+    for kw in keywords:
+        if any(kw in col.lower() for col in matched_col_names):
+            matched_kw.append(kw)
+
+    for col_name in matched_col_names:
+        matched_cols_list.append(col_name)
+        for c in schema.columns:
+            if c.name.lower() == col_name and c.description:
+                matched_descs.append(c.description)
+
+    for c in schema.columns:
+        name_lower = c.name.lower()
+        if any(kw in name_lower for kw in keywords):
+            if c.description and any(kw in c.description.lower() for kw in keywords):
+                matched_descs.append(c.description)
+
+    rep_columns: list[str] = []
+    seen = set()
+    for col in matched_cols_list:
+        if col not in seen:
+            rep_columns.append(col)
+            seen.add(col)
+    for c in schema.columns:
+        if c.name.lower() not in seen:
+            rep_columns.append(c.name.lower())
+            seen.add(c.name.lower())
+            if len(rep_columns) >= 5:
+                break
+
+    return CandidateFeatures(
+        matched_keywords=matched_kw[:8],
+        matched_columns=matched_cols_list[:8],
+        matched_descriptions=list(set(matched_descs))[:3],
+        matched_metrics=list(metrics)[:5],
+        matched_grains=list(grain_hints)[:3],
+        representative_columns=rep_columns[:5],
+        layer=schema.layer,
+    )
+
+
+def _apply_layer_adjustment(
+    score: float, layer: str, grain_hints: set[str], reasons: list[str]
+) -> float:
+    layer_lower = layer.lower()
+
+    base_penalty = _LAYER_PENALTY.get(layer_lower, 0.0)
+    if base_penalty:
+        score += base_penalty
+        reasons.append(f"layer '{layer}' penalty ({base_penalty:+.1f})")
+
+    for hint in grain_hints:
+        preferred_layer = _GRAIN_TO_LAYER.get(hint)
+        if preferred_layer == layer_lower:
+            score += 0.3
+            reasons.append(f"grain '{hint}' matches layer '{layer}' (boost +0.3)")
+
+    return score
 
 
 def _description_score(
@@ -280,9 +435,35 @@ def _resolve_matched_columns(
     return result
 
 
+def _semantic_score(
+    keywords: set[str],
+    schema: TableSchema,
+    semantic_index: SemanticIndex,
+) -> tuple[float, list[str], set[str]]:
+    score = 0.0
+    reasons: list[str] = []
+    matched: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for kw in keywords:
+        hits = semantic_index.lookup(kw)
+        for tbl, col in hits:
+            if tbl != schema.name:
+                continue
+            pair = (tbl, col)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            score += 2.0
+            matched.add(col)
+            reasons.append(f"semantic index '{kw}'→'{col}' (boost +2.0)")
+
+    return score, reasons, matched
+
+
 def _build_alias_map(
     keywords: set[str],
-    matched_tables: list[ScoredTable],
+    candidates: list[ScoredTable],
 ) -> dict[str, list[tuple[str, str, str | None]]]:
     alias_map: dict[str, list[tuple[str, str, str | None]]] = {}
 
@@ -291,7 +472,7 @@ def _build_alias_map(
         if not category:
             continue
 
-        for st in matched_tables:
+        for st in candidates:
             for col in st.schema.columns:
                 name_lower = col.name.lower()
                 parts = set(name_lower.split("_"))
@@ -302,6 +483,14 @@ def _build_alias_map(
                 )
 
                 if kw in parts or category in parts:
+                    agg = "SUM" if is_numeric else None
+                    entry = (col.name, st.schema.name, agg)
+                    if entry not in alias_map.setdefault(kw, []):
+                        alias_map[kw].append(entry)
+                    continue
+
+                synonyms = _COLUMN_SYNONYMS.get(kw, set())
+                if synonyms & parts:
                     agg = "SUM" if is_numeric else None
                     entry = (col.name, st.schema.name, agg)
                     if entry not in alias_map.setdefault(kw, []):

@@ -18,7 +18,7 @@ REPORTS_DIR = os.path.join(_PROJECT_ROOT, "autoresearch", "reports")
 @dataclass
 class GridSearchConfig:
     max_depth_values: list[int] = field(default_factory=lambda: [1, 3, 5])
-    high_conf_values: list[float] = field(default_factory=lambda: [0.7, 0.85, 0.95])
+    beam_width_values: list[int] = field(default_factory=lambda: [2, 3, 5])
     max_attempts_values: list[int] = field(default_factory=lambda: [1, 3, 5])
     calibration_values: list[bool] = field(default_factory=lambda: [True, False])
     parallel: bool = True
@@ -26,13 +26,13 @@ class GridSearchConfig:
 
     @property
     def param_grid(self) -> list[dict[str, Any]]:
-        keys = ["max_depth", "high_confidence", "max_attempts_per_node", "calibration_enabled"]
+        keys = ["max_depth", "beam_width", "max_attempts_per_node", "calibration_enabled"]
         result: list[dict[str, Any]] = []
         for md in self.max_depth_values:
-            for hc in self.high_conf_values:
+            for bw in self.beam_width_values:
                 for ma in self.max_attempts_values:
                     for cal in self.calibration_values:
-                        result.append(dict(zip(keys, (md, hc, ma, cal))))
+                        result.append(dict(zip(keys, (md, bw, ma, cal))))
         return result
 
     @property
@@ -61,7 +61,7 @@ class GridSearchReport:
             "problem": asdict(self.problem),
             "config": {
                 "max_depth_values": self.config.max_depth_values,
-                "high_conf_values": self.config.high_conf_values,
+                "beam_width_values": self.config.beam_width_values,
                 "max_attempts_values": self.config.max_attempts_values,
                 "calibration_values": self.config.calibration_values,
                 "parallel": self.config.parallel,
@@ -88,7 +88,7 @@ class GridSearchReport:
 def _build_overrides(params: dict[str, Any]) -> dict[str, Any]:
     overrides = {
         "max_depth": params["max_depth"],
-        "high_confidence": params["high_confidence"],
+        "beam_width": params["beam_width"],
         "max_attempts_per_node": params["max_attempts_per_node"],
     }
     if "calibration_enabled" in params:
@@ -150,7 +150,7 @@ def _write_reports(report: GridSearchReport) -> None:
         "| Parameter | Values |",
         "|-----------|--------|",
         f"| max_depth | {report.config.max_depth_values} |",
-        f"| high_confidence | {report.config.high_conf_values} |",
+        f"| beam_width | {report.config.beam_width_values} |",
         f"| max_attempts_per_node | {report.config.max_attempts_values} |",
         f"| calibration_enabled | {report.config.calibration_values} |",
         f"| max_workers | {report.config.max_workers} |",

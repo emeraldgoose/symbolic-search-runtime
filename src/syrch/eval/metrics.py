@@ -26,6 +26,9 @@ class EvaluationMetrics:
     retriever_precision: float = 0.0
     dag_node_count: int = 0
     dag_minimal: bool = True
+    context_available: int = 0
+    context_consumed: int = 0
+    context_sql_usage: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +49,9 @@ class EvaluationMetrics:
             "retriever_precision": self.retriever_precision,
             "dag_node_count": self.dag_node_count,
             "dag_minimal": self.dag_minimal,
+            "context_available": self.context_available,
+            "context_consumed": self.context_consumed,
+            "context_sql_usage": self.context_sql_usage,
         }
 
 
@@ -59,6 +65,13 @@ def evaluate(
         len(r.reasoning_paths) for r in (solution.tree or [])
     )
     metrics.num_subtasks = len(solution.tree or [])
+    if solution.tree:
+        metrics.context_available = sum(1 for r in solution.tree if r.had_context)
+        metrics.context_consumed = sum(1 for r in solution.tree if r.context_used)
+        if metrics.context_available > 0:
+            metrics.context_sql_usage = (
+                metrics.context_consumed / metrics.context_available
+            )
     max_depth_val = 0
     for res in solution.tree or []:
         for path in res.reasoning_paths:

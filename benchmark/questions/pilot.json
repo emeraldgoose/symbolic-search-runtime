@@ -16,6 +16,11 @@
     "expected_sql_patterns": ["SUM", "WHERE"],
     "forbidden_sql_patterns": [],
     "acceptable_patterns": ["direct_query"],
+    "source_ambiguity": {
+      "justified": true,
+      "equivalent_tables": ["mart_sales_monthly", "mart_sales_daily"],
+      "note": "Schema-only evidence cannot rank dw_sales_order.total_amount vs mart_sales_monthly.total_revenue for 'total revenue' — both are defensible aggregate sources."
+    },
     "ground_truth_result_path": "generated/answers/pilot/S1.csv",
     "ground_truth_sql": "SELECT SUM(total_amount) AS total_revenue FROM dw_sales_order WHERE order_date >= '2024-01-01' AND order_date < '2025-01-01'"
   },

@@ -142,7 +142,6 @@ def test_e2e_wikipedia_clickstream_pipeline():
         db_path=WIKI_DB,
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
     )
     executor = SQLiteExecutor(config.db_path)
@@ -180,7 +179,6 @@ def test_e2e_orders_10dim_pipeline():
         db_path=ORDERS_DB,
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
     )
     executor = SQLiteExecutor(config.db_path)
@@ -236,7 +234,6 @@ def test_e2e_multi_layer_dag():
         db_path=WIKI_DB,
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
     )
     executor = SQLiteExecutor(config.db_path)

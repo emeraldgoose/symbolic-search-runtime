@@ -7,7 +7,7 @@ import pandas as pd
 from langdetect import detect, DetectorFactory, LangDetectException
 
 from syrch.core.config import ExecutionConfig
-from syrch.core.models import FinalSolution, JoinKey, NodeResult, TaskDAG
+from syrch.core.models import FinalSolution, JoinKey, NodeResult, NodeStatus, TaskDAG
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 
@@ -72,14 +72,21 @@ class Aggregator:
         all_data = None
         total_tokens = 0
         best_conf = 0.0
-        best_data_cost: int | None = None
 
         all_joins = [jk for node in dag.nodes.values() if node.join_keys for jk in node.join_keys]
 
+        # The Aggregator does NOT re-rank candidates. Each node already chose
+        # its own result (Local Selection). Here we only pick which leaf result
+        # to synthesize around, preferring SOLVED leaves by their selected
+        # candidate's evidence and preserving ambiguity instead of faking a
+        # winner.
+        leaf_results: list[NodeResult] = []
         for nid in leaf_ids:
             res = results.get(nid)
             if res is None:
                 continue
+            leaf_results.append(res)
+            total_tokens += res.cost_tokens
             summary = f"[{nid}] {res.sql}"
             if res.data is not None and not res.data.empty:
                 ncols = len(res.data.columns)
@@ -89,13 +96,21 @@ class Aggregator:
             else:
                 summary += "\n  → (no data)"
             result_summaries.append(summary)
-            total_tokens += res.cost_tokens
-            better = res.confidence > best_conf
-            tie = res.confidence == best_conf and (best_data_cost is None or res.cost_tokens < best_data_cost)
-            if (better or tie) and res.data is not None:
-                best_conf = res.confidence
-                best_data_cost = res.cost_tokens
-                all_data = res.data
+
+        primary = self._pick_primary(leaf_results)
+
+        if (primary is None
+                or primary.data is None
+                or primary.data.empty):
+            fallback = self._pick_solved_any(list(results.values()))
+            if fallback is not None:
+                primary = fallback
+
+        if primary is not None and primary.data is not None and not primary.data.empty:
+            all_data = primary.data
+            best_conf = primary.confidence
+            if primary.selected_candidate is not None:
+                best_conf = max(best_conf, primary.selected_candidate.confidence)
 
         merged = self._try_join_merge(leaf_ids, results, all_joins) if all_joins else None
         if merged is not None:
@@ -119,13 +134,26 @@ class Aggregator:
             if res.sql and res.sql not in sql_lines:
                 sql_lines.append(res.sql)
 
-        # Confidence calibration: adjust by ambiguity + heuristics
+        # Confidence: preserve ambiguity instead of masking it. A leaf that the
+        # local search could not resolve lowers confidence; a BLOCKED/FAILED
+        # leaf is penalized so the answer reflects the missing dependency.
         max_ambiguity = max(
             (getattr(res, 'ambiguity_score', 0.0) or 0.0) for res in results.values()
         )
         heuristic_penalty = self._check_result_heuristics(question, results)
+        if any(r.status == NodeStatus.AMBIGUOUS for r in leaf_results):
+            heuristic_penalty = min(1.0, heuristic_penalty + 0.10)
         adjusted_conf = best_conf * (1.0 - max_ambiguity * 0.5) * (1.0 - heuristic_penalty)
         adjusted_conf = max(0.0, min(1.0, round(adjusted_conf, 3)))
+
+        cand_ps = (
+            primary.selected_candidate.path_score.total
+            if primary is not None
+            and primary.selected_candidate is not None
+            and primary.selected_candidate.path_score is not None
+            else -1.0
+        )
+        path_score = cand_ps if cand_ps >= 0 else adjusted_conf
 
         return FinalSolution(
             question=question,
@@ -133,9 +161,66 @@ class Aggregator:
             data=all_data,
             sql="\n\n".join(sql_lines),
             confidence=adjusted_conf,
+            path_score=path_score,
             token_cost=total_tokens,
             tree=list(results.values()),
         )
+
+    @staticmethod
+    def _pick_primary(leaf_results: list[NodeResult]) -> NodeResult | None:
+        """Trust node-level Local Selection; never re-rank candidates.
+
+        SOLVED leaves (with a `selected_candidate`) outrank AMBIGUOUS leaves;
+        among SOLVED leaves the selected candidate's evidence is used. An
+        AMBIGUOUS leaf keeps its provisional data only if no SOLVED leaf
+        exists — it is not fabricated as a winner.
+        """
+
+        def key(res: NodeResult):
+            sel = res.selected_candidate
+            if sel is not None:
+                return (
+                    1,
+                    sel.semantic_match,
+                    sel.result_quality,
+                    sel.structural_match,
+                    -sel.cost_tokens,
+                )
+            if res.status == NodeStatus.AMBIGUOUS:
+                return (0, res.confidence, 0.0, 0.0, 0)
+            return (-1, 0.0, 0.0, 0.0, 0)
+
+        ranked = sorted(leaf_results, key=key, reverse=True)
+        for res in ranked:
+            if res.data is not None and not res.data.empty:
+                return res
+        return ranked[0] if ranked else None
+
+    @staticmethod
+    def _pick_solved_any(results: list[NodeResult]) -> NodeResult | None:
+        """Fallback when no leaf carries usable data: surface the best SOLVED
+        node's result (dependency evidence) instead of returning nothing.
+        The FAILED/BLOCKED status still drives the confidence penalty below."""
+        solved = [
+            r for r in results
+            if r.status == NodeStatus.SOLVED
+            and r.selected_candidate is not None
+            and r.data is not None
+            and not r.data.empty
+        ]
+
+        def key(res: NodeResult):
+            sel = res.selected_candidate
+            if sel is None:
+                return (0.0, 0.0, 0.0, 0)
+            return (
+                sel.semantic_match,
+                sel.result_quality,
+                sel.structural_match,
+                -sel.cost_tokens,
+            )
+
+        return max(solved, key=key) if solved else None
 
     def _check_result_heuristics(
         self, question: str, results: dict[str, NodeResult]
@@ -152,6 +237,8 @@ class Aggregator:
         applied_by_year = False
 
         for res in results.values():
+            if res.status in (NodeStatus.FAILED, NodeStatus.BLOCKED):
+                total_penalty += 0.15
             if res.data is not None and res.data.empty:
                 total_penalty += 0.15
             if res.error is not None:

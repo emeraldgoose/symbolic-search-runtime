@@ -48,7 +48,10 @@ def query(
     llm_provider: str = "openai",
     max_depth: int = 3,
     max_attempts: int = 3,
-    high_confidence: float = 0.85,
+    search_policy: str = "beam",
+    beam_width: int = 3,
+    candidate_budget: int = 8,
+    stop_margin: float = 0.15,
     token_budget: int = 100_000,
     verbose: bool = False,
     cache: bool = True,
@@ -69,7 +72,10 @@ def query(
             executor_type=executor_type,
             max_depth=max_depth,
             max_attempts_per_node=max_attempts,
-            high_confidence=high_confidence,
+            search_policy=search_policy,
+            beam_width=beam_width,
+            candidate_budget=candidate_budget,
+            stop_margin=stop_margin,
             token_budget=token_budget,
             verbose=verbose,
             cache_enabled=cache,
@@ -169,8 +175,14 @@ def _extract_tables_from_tree(tree: list[NodeResult]) -> list[str]:
         if node.sql:
             for match in pattern.finditer(node.sql):
                 tbl = match.group(1)
-                if tbl not in cte_names:
-                    tables.add(tbl)
+                if tbl in cte_names:
+                    continue
+                # materialized dependency contexts (`_task_context_*`) are not
+                # physical candidate tables — exclude them from tables_used so
+                # the evaluator doesn't count them as irrelevant physical usage.
+                if tbl.startswith("_task_context_"):
+                    continue
+                tables.add(tbl)
     return sorted(tables)
 
 
