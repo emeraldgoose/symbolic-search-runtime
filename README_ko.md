@@ -558,42 +558,6 @@ Scheduler / Executor → "Task 간 결과를 어떻게 전달할까?" (Context/D
 
 노드 상태: 의존성이 `FAILED`/`BLOCKED`이면 하위 노드는 SQL 실행 없이 `BLOCKED`로 단락됩니다. `AMBIGUOUS`는 context를 materialize하지 않으므로 불확실한 결과가 downstream의 사실이 되지 않습니다.
 
-## Executor 추상화
-
-모든 Executor는 `BaseExecutor`를 따릅니다:
-
-```python
-class BaseExecutor(ABC):
-    def execute(sql: str) -> DataFrame: ...
-    def get_schema(table_name?: str) -> TableSchema: ...
-    def list_tables() -> list[str]: ...
-    def close(): ...
-```
-
-| Executor | 백엔드 | 연결 방식 |
-|----------|--------|----------|
-| `SQLiteExecutor` | SQLite | `sqlite3` (thread-safe via `threading.local`) |
-| `JDBCExecutor` | Any JDBC | SQLAlchemy |
-| `DatabricksExecutor` | Databricks SQL | `databricks-sql-connector` (PEP 249) |
-| `SparkExecutor` | SparkSession | `pyspark` (`SparkSession.builder.getOrCreate()`) |
-
-### Context Materialization (v0.3.5b)
-
-SOLVED 노드의 결과는 실제 테이블 `_task_context_<id>`로 쓰여져 의존 노드가 JOIN할 수 있습니다.
-각 Executor는 `materialize_context(context)` / `drop_context(table)`를 오버라이드합니다:
-
-| Executor | 방식 |
-|----------|------|
-| `SQLiteExecutor` | `DROP` + `to_sql` + commit |
-| `SparkExecutor` | `createOrReplaceTempView` |
-| `JDBCExecutor` | `to_sql(if_exists="replace")` |
-| `DatabricksExecutor` | `CREATE OR REPLACE TEMP VIEW` |
-
-`_task_context_*` 테이블은 `list_tables()`에서 제외되어 retriever가 물리 후보로 취급하지 않습니다.
-스케줄러는 각 SOLVED 노드 후 materialize하고(AMBIGUOUS/FAILED/BLOCKED/empty는 건너뜀),
-실행 종료 시 모든 materialized 테이블을 삭제합니다. `ExecutionConfig.materialize_context`
-(기본 `True`, env `SYRCH_MATERIALIZE_CONTEXT`)가 전체 기능을 게이트합니다.
-
 ## 캐싱
 
 모든 LLM 및 SQL 호출은 `diskcache`를 통해 캐시됩니다 (24h TTL):
@@ -605,77 +569,6 @@ SOLVED 노드의 결과는 실제 테이블 `_task_context_<id>`로 쓰여져 �
 | SQL `execute()` | `CachedExecutor` | SHA256(sql) |
 
 `--cache/--no-cache` 플래그로 전환; TTL은 `--cache-ttl`로 설정 가능.
-
-## 데이터셋
-
-`scripts/gen_fixtures.py`로 `tests/fixtures/`에 생성됩니다:
-
-| Dataset | Rows | Size | 설명 |
-|---------|------|------|------|
-| `wikipedia_clickstream.sqlite` | ~200 | ~36 KB | 위키백과 클릭스트림 집계 데이터 |
-| `orders_10dim.sqlite` | 1000+ | ~90 KB | 합성 주문 데이터 (10개 차원 컬럼) |
-
-## Benchmark 계층 분리
-
-실패는 "LLM이 못 풀었다"가 아니라 **정확히 어떤 계층의 책임인지**로 분류됩니다:
-
-```
-RECALL        기대 정답 테이블이 후보 풀에 없음 → Retriever / CandidatePolicy
-GENERATION    SQL 생성/검증 문제             → RLM / Validator
-CONTEXT       context 미가용/미소비/미사용   → ParentContext / materialization / scope
-SELECTION     viable 후보 중 잘못된 선택      → Evaluator / evidence sufficiency
-PLANNER       잘못된 분해/요구사항           → RequirementSpec / TaskDAG
-AGGREGATION   잘못된 최종 구성              → Aggregator
-```
-
-문제별 진단은 전체 체인을 추적합니다:
-
-```
-Question → Planner correctness → Retriever recall → Candidate generation →
-SQL scope correctness → SQL execution → Evaluator selection →
-context_available → context_consumed → context_sql_usage → Final result
-```
-
-- 기대 정답 테이블이 후보 풀에 없으면 **Recall 실패**이지 Selection 실패가 아닙니다.
-- context 사용은 `context_available → context_consumed → context_sql_usage →
-  result correctness`로 각각 측정됩니다 (`eval/metrics.py`).
-- 4-way 결과: `correct / justified_ambiguous / wrong / failed`.
-
-## 테스트
-
-```bash
-# 단위 + 통합 테스트 (FakeLLM, API 키 불필요)
-pytest tests/ -v
-
-# 현재: 155개 테스트 통과
-#   api, cache, clarify, discrimination, e2e, eval, integration,
-#   materialize, planner, rlm_engine, scheduler, search_policy, validator
-```
-
-### 실제 환경 검증
-
-```bash
-# 전체 검증 실행 (LLM API 키 필요)
-python scripts/validate_real.py
-
-# 특정 레벨
-python scripts/validate_real.py --level 3 --verbose
-
-# 커스텀 질문
-python scripts/validate_real.py --question "Total revenue by year?" --db orders_10dim.sqlite
-
-# 로컬 모델 사용
-python scripts/validate_real.py --model qwen3.5-4b-4bit
-
-# 결과 (2026-06-15, qwen3.5-4b-4bit):
-#   L1 Easy           3/3 PASS
-#   L2 Medium         3/3 PASS
-#   L3 Complex        2/2 PASS
-#   L4 Very Complex   2/2 PASS
-#   L5 Ambiguous      2/2 AMBIGUOUS (expected)
-#   ─────────────────────────────
-#   Total             10 PASS | 2 AMBIGUOUS (83.3% pass rate)
-```
 
 ## 연구 배경
 
