@@ -13,7 +13,7 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **Divide & Conquer**: Decompose a problem into logically independent sub-problems (sub-tasks), solve each independently, then merge results. Sub-problems can depend on each other forming a DAG.
 - **RLM (Recursive Language Model)**: Each sub-task runs its own REPL loop — generate SQL → validate syntax → validate schema → execute → quality check → evaluate evidence. Multiple reasoning paths are explored per node.
 - **Evidence-based Selection**: The RLM explores a candidate pool (best-first by retriever prior), evaluates each candidate on discrimination signals (`structural_match`, `grain_match`, `dimension_match`, `time_match`, `result_quality`), and selects lexicographically. Ties on all signals → **AMBIGUOUS** (never resolved by execution/retriever/cost order).
-- **Candidate Scope (S3)**: Each attempt is confined to `PRIMARY` (the candidate under test), `JOIN-AVAILABLE` (pool-bounded supporting tables), and `TASK CONTEXT` (materialized parent results). FROM must anchor on PRIMARY/TASK CONTEXT; JOIN may use PRIMARY/JOIN-AVAILABLE/TASK CONTEXT.
+- **Candidate Scope**: Each attempt is confined to `PRIMARY` (the candidate under test), `JOIN-AVAILABLE` (pool-bounded supporting tables), and `TASK CONTEXT` (materialized parent results). FROM must anchor on PRIMARY/TASK CONTEXT; JOIN may use PRIMARY/JOIN-AVAILABLE/TASK CONTEXT.
 - **Grid Search**: Systematic hyperparameter testing (`max_depth`, `beam_width`, `max_attempts_per_node`, `calibration_enabled`) to find optimal configs.
 - **Multi-table Schema**: Retriever scores all tables by relevance, Planner selects per subtask, and RLM sees only the per-attempt scope (not all tables).
 - **Search over reasoning, not execution**: D&C splits the *problem space*, not the SQL. Each sub-problem is a complete reasoning unit (think → code → validate → execute → evaluate).
@@ -306,17 +306,17 @@ syrch benchmark --file benchmarks/orders.jsonl
 | | `--db` | Database path |
 | | `--executor` | Executor type |
 | | `--expected` | Expected results CSV |
-| | `--report-format` | `md` / `json` |
 | `benchmark` | `--file` | JSONL benchmark file |
 | | `--executor` | Executor type |
 | | `--report` | Output report path |
+| | `--report-format` | `md` / `json` |
 | `schema` | `DB` | Database path (positional) |
 | | `-t` / `--table` | Specific table |
 | `config` | `--db` | Database path |
 
 ## Configuration
 
-Config loaded from (priority order): **CLI args > env vars (`SYRCH_*`) > config file > Databricks Secrets > defaults**.
+Config loaded from (priority order): **CLI args > config file > env vars (`SYRCH_*`) > Databricks Secrets > defaults**.
 
 ### Config File (`syrch.yml`)
 
@@ -347,7 +347,7 @@ execution:
   verbose: false
 ```
 
-Search paths: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` explicit override
+Search paths: `./syrch.yml` > `./syrch.yaml` > `~/.syrch/config.yml` > `~/.syrch/config.yaml` (`--config <path>` overrides all)
 
 ### Environment Variables
 
@@ -356,8 +356,17 @@ Search paths: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` explicit
 | `SYRCH_MODEL` | `llm.model` | `gpt-4o` |
 | `SYRCH_API_KEY` | `llm.api_key` | `sk-...` |
 | `SYRCH_BASE_URL` | `llm.base_url` | `http://localhost:11434/v1` |
+| `SYRCH_LLM_PROVIDER` | `llm.provider` | `openai` |
+| `SYRCH_TEMPERATURE` | `llm.temperature` | `0.7` |
+| `SYRCH_MAX_TOKENS` | `llm.max_tokens_per_call` | `4096` |
+| `SYRCH_TIMEOUT` | `llm.timeout_seconds` | `120` |
+| `SYRCH_EXECUTOR` | `execution.executor_type` | `sqlite` |
 | `SYRCH_MAX_DEPTH` | `execution.max_depth` | `3` |
+| `SYRCH_MAX_ATTEMPTS` | `execution.max_attempts_per_node` | `3` |
+| `SYRCH_TOKEN_BUDGET` | `execution.token_budget` | `100000` |
 | `SYRCH_VERBOSE` | `execution.verbose` | `true` |
+| `SYRCH_CACHE` | `execution.cache_enabled` | `true` |
+| `SYRCH_CACHE_TTL` | `execution.cache_ttl` | `86400` |
 | `SYRCH_SEARCH_POLICY` | `execution.search_policy` | `beam` |
 | `SYRCH_BEAM_WIDTH` | `execution.beam_width` | `3` |
 | `SYRCH_CANDIDATE_BUDGET` | `execution.candidate_budget` | `8` |
@@ -366,6 +375,9 @@ Search paths: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` explicit
 | `SYRCH_MAX_REPLANS` | `execution.max_replans` | `1` |
 | `SYRCH_CALIBRATION` | `execution.calibration_enabled` | `true` |
 | `SYRCH_MATERIALIZE_CONTEXT` | `execution.materialize_context` | `true` |
+| `SYRCH_INTERACTIVE` | `execution.interactive` | `true` |
+| `SYRCH_AMBIGUITY_THRESHOLD` | `execution.ambiguity_threshold` | `0.35` |
+| `SYRCH_MAX_CONCURRENCY` | `execution.max_concurrency` | `5` |
 
 ### Databricks Connection
 
@@ -378,6 +390,8 @@ Search paths: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` explicit
 | `DATABRICKS_CLIENT_ID` | oauth/azure | OAuth client ID |
 | `DATABRICKS_CLIENT_SECRET` | oauth/azure | OAuth client secret |
 | `AZURE_TENANT_ID` | azure | Azure AD tenant ID |
+| `DATABRICKS_CATALOG` | all | Catalog name (optional) |
+| `DATABRICKS_SCHEMA` | all | Schema name (optional) |
 
 ## Structured Logging
 
@@ -488,7 +502,7 @@ The RLM engine explores candidate tables under a pluggable `SearchPolicy`
 
 This replaces the old "calibrated confidence ≥ 0.85 → greedy accept" rule. Simple problems still resolve quickly (small pools), while ambiguous ones explore more candidates within the budget.
 
-## Candidate Scope (S3)
+## Candidate Scope
 
 Each RLM attempt builds an explicit per-attempt schema scope (`AttemptSchemaContext`):
 
@@ -515,22 +529,22 @@ JOIN  → PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
 The whole design rests on one principle: **each layer never invades the
 responsibility of the layers above or below it.**
 
-| Module | Core question | Input | Output | Must NOT do |
-|--------|---------------|-------|--------|-------------|
-| Planner | What to solve? | Question + Schema | RequirementSpec + DAG | Generate SQL / pick the answer table |
-| Retriever | Where to look? | Requirement + Semantic Index | Candidate Pool | Make the final candidate pick |
-| SemanticIndex | What schema evidence exists? | DB metadata | semantic evidence | Inject ground truth |
-| TaskDAG | How to split work? | RequirementSpec | DAG | Generate SQL |
-| Scheduler | In what order? | DAG | Node execution | Generate SQL / judge semantics |
-| ParentContext | How to pass parent results? | NodeResult | Context metadata + data | Re-judge meaning |
-| RLM | How to execute? | Node + Requirement + Scope | SQL candidates | Redesign the DAG |
-| Validator | Is the SQL allowed? | SQL + Schema + Scope | Valid/Fail | Judge semantic superiority |
-| Executor | Run the SQL | Valid SQL | ExecutionResult | Modify the SQL |
-| Materializer | Make parent results reusable | ParentContext | `_task_context_X` | Pick a candidate |
-| Evaluator | Does the candidate meet the requirement? | Requirement + SQL + Result | CandidateEvaluation | Decide search order |
-| Selection | Which candidate is adopted? | CandidateEvaluations | Selected / AMBIGUOUS | Tie-break by execution order |
-| Replanner | Reconfigure the search? | Failure / Ambiguity | Expanded/merged candidates | Drop existing valid candidates |
-| Aggregator | What is the final answer? | NodeResults | Final Answer | Re-rank candidates |
+| Module | Core question | Input | Output |
+|--------|---------------|-------|--------|
+| Planner | What to solve? | Question + Schema | RequirementSpec + DAG |
+| Retriever | Where to look? | Requirement + Semantic Index | Candidate Pool |
+| SemanticIndex | What schema evidence exists? | DB metadata | semantic evidence |
+| TaskDAG | How to split work? | RequirementSpec | DAG |
+| Scheduler | In what order? | DAG | Node execution |
+| ParentContext | How to pass parent results? | NodeResult | Context metadata + data |
+| RLM | How to execute? | Node + Requirement + Scope | SQL candidates |
+| Validator | Is the SQL allowed? | SQL + Schema + Scope | Valid/Fail |
+| Executor | Run the SQL | Valid SQL | ExecutionResult |
+| Materializer | Make parent results reusable | ParentContext | `_task_context_X` |
+| Evaluator | Does the candidate meet the requirement? | Requirement + SQL + Result | CandidateEvaluation |
+| Selection | Which candidate is adopted? | CandidateEvaluations | Selected / AMBIGUOUS |
+| Replanner | Reconfigure the search? | Failure / Ambiguity | Expanded/merged candidates |
+| Aggregator | What is the final answer? | NodeResults | Final Answer |
 
 Four responsibilities are always kept separate:
 
@@ -615,7 +629,7 @@ Generated by `scripts/gen_fixtures.py` into `tests/fixtures/`:
 Failures are attributed to a single layer, not "the LLM failed":
 
 ```
-RECALL        GT not in the candidate pool        → Retriever / CandidatePolicy
+RECALL        expected table not in the candidate pool → Retriever / CandidatePolicy
 GENERATION    SQL generation / validation issues   → RLM / Validator
 CONTEXT       context not available/consumed/SQL  → ParentContext / materialization / scope
 SELECTION     wrong pick from viable candidates    → Evaluator / evidence sufficiency
@@ -631,9 +645,11 @@ SQL scope correctness → SQL execution → Evaluator selection →
 context_available → context_consumed → context_sql_usage → Final result
 ```
 
-- `GT ∉ pool` is a **Recall failure**, not a Selection failure.
-- S3/S4 report `context_available → context_consumed → context_sql_usage →
-  result correctness` separately (see `eval/metrics.py`).
+- When the expected answer table is not in the candidate pool, that is a
+  **Recall failure**, not a Selection failure.
+- Context usage is reported separately as
+  `context_available → context_consumed → context_sql_usage → result
+  correctness` (see `eval/metrics.py`).
 - 4-way outcome: `correct / justified_ambiguous / wrong / failed`.
 
 ## Testing
@@ -660,16 +676,16 @@ python scripts/validate_real.py --level 3 --verbose
 python scripts/validate_real.py --question "Total revenue by year?" --db orders_10dim.sqlite
 
 # With local model
-python scripts/validate_real.py --model qwen3.5-4b --max-concurrency 1
+python scripts/validate_real.py --model qwen3.5-4b-4bit
 
-# Results (2026-06-15, minimax-m3:cloud):
+# Results (2026-06-15, qwen3.5-4b-4bit):
 #   L1 Easy           3/3 PASS
 #   L2 Medium         3/3 PASS
 #   L3 Complex        2/2 PASS
 #   L4 Very Complex   2/2 PASS
 #   L5 Ambiguous      2/2 AMBIGUOUS (expected)
 #   ─────────────────────────────
-#   Total             10/10 PASS  100% (2 AMBIGUOUS)
+#   Total             10 PASS | 2 AMBIGUOUS (83.3% pass rate)
 ```
 
 ## Research Background
@@ -682,17 +698,3 @@ python scripts/validate_real.py --model qwen3.5-4b --max-concurrency 1
 - **AdaptOrch**: Topology-aware multi-agent orchestration (parallel/sequential/hierarchical/hybrid). [`paper`](https://arxiv.org/abs/2602.16873)
 - **DST**: Adaptive tree search with confidence-based pruning (26-75% computation reduction). [`paper`](https://arxiv.org/abs/2603.20267)
 - **LLM Compiler**: Parallel task scheduling via dependency graphs; closely related to syrch's DAG scheduler and layer-by-layer execution. [`paper`](https://arxiv.org/abs/2312.13311)
-
-## Open Research Questions
-
-| Question | Approach |
-|----------|----------|
-| **When to stop dividing?** (Unit case detection) | Experiment with LLM self-assessment + complexity heuristics |
-| **How to merge sub-task results?** | DAG-based REPL variable passing + Aggregator role |
-| **How to prune search space?** | Confidence-based pruning + uncertainty-aware allocation |
-| **Optimal D&C strategy?** | Topology routing (AdaptOrch) based on DAG structure metrics |
-| **Optimal calibration weights?** | Grid search over penalty coefficients per signal |
-| **Join key inference?** | Planner emits join_keys between sub-tasks |
-| **Recursive decomposition?** | Planner recurses on non-atomic sub-tasks |
-| **When SQL cannot solve?** | RLM clarification: ambiguity score → interactive feedback → re-decompose |
-| **Optimal clarification threshold?** | Grid search over score weights + decision boundary |

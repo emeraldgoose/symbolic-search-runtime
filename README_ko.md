@@ -13,7 +13,7 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **분할 정복**: 문제를 논리적으로 독립적인 하위 문제(sub-task)로 분해하고, 각각 독립적으로 해결한 뒤 결과를 병합합니다. 하위 문제 간 의존성은 DAG로 표현됩니다.
 - **RLM (Recursive Language Model)**: 각 하위 문제는 자체 REPL 루프에서 실행됩니다 — SQL 생성 → 구문 검증 → 스키마 검증 → 실행 → 품질 검사 → evidence 평가. 노드당 여러 후보를 탐색합니다.
 - **Evidence 기반 선택**: RLM은 retriever prior(best-first)로 후보 풀을 탐색하고, 각 후보를 판별 신호(`structural_match`, `grain_match`, `dimension_match`, `time_match`, `result_quality`)로 평가해 사전식(lexicographic)으로 선택합니다. 모든 신호가 동률이면 **AMBIGUOUS** — 실행/retriever/cost 순서로는 절대 해소되지 않습니다.
-- **후보 범위(Candidate Scope, S3)**: 각 시도는 `PRIMARY`(현재 후보), `JOIN-AVAILABLE`(풀에 속한 보조 테이블), `TASK CONTEXT`(materialized 부모 결과)로 제한됩니다. FROM은 PRIMARY/TASK CONTEXT만 앵커 가능, JOIN은 PRIMARY/JOIN-AVAILABLE/TASK CONTEXT만 사용 가능.
+- **후보 범위(Candidate Scope)**: 각 시도는 `PRIMARY`(현재 후보), `JOIN-AVAILABLE`(풀에 속한 보조 테이블), `TASK CONTEXT`(materialized 부모 결과)로 제한됩니다. FROM은 PRIMARY/TASK CONTEXT만 앵커 가능, JOIN은 PRIMARY/JOIN-AVAILABLE/TASK CONTEXT만 사용 가능.
 - **격자 탐색(Grid Search)**: 하이퍼파라미터(`max_depth`, `beam_width`, `max_attempts_per_node`, `calibration_enabled`)를 체계적으로 테스트하여 최적 설정을 찾습니다.
 - **다중 테이블 스키마**: Retriever가 모든 테이블을 관련성별로 점수화하고, Planner가 sub-task별로 테이블을 선택하며, RLM은 시도별 범위(scope)의 테이블만 참조합니다.
 - **실행이 아닌 추론에 대한 탐색**: D&C는 *문제 공간*을 분할하며, SQL을 분할하지 않습니다. 각 하위 문제는 완전한 추론 단위입니다 (생각 → 코드 → 검증 → 실행 → 평가).
@@ -304,17 +304,17 @@ syrch benchmark --file benchmarks/orders.jsonl
 | | `--db` | 데이터베이스 경로 |
 | | `--executor` | Executor 유형 |
 | | `--expected` | 예상 결과 CSV |
-| | `--report-format` | `md` / `json` |
 | `benchmark` | `--file` | JSONL 벤치마크 파일 |
 | | `--executor` | Executor 유형 |
 | | `--report` | 출력 리포트 경로 |
+| | `--report-format` | `md` / `json` |
 | `schema` | `DB` | 데이터베이스 경로 (positional) |
 | | `-t` / `--table` | 특정 테이블 |
 | `config` | `--db` | 데이터베이스 경로 |
 
 ## 설정 (Configuration)
 
-설정은 다음 우선순위로 로드됩니다: **CLI 인자 > 환경변수 (`SYRCH_*`) > 설정 파일 > Databricks Secrets > 기본값**.
+설정은 다음 우선순위로 로드됩니다: **CLI 인자 > 설정 파일 > 환경변수 (`SYRCH_*`) > Databricks Secrets > 기본값**.
 
 ### 설정 파일 (`syrch.yml`)
 
@@ -345,7 +345,7 @@ execution:
   verbose: false
 ```
 
-검색 위치: `./syrch.yml` > `~/.syrch/config.yml` > `--config <path>` 명시 지정
+검색 위치: `./syrch.yml` > `./syrch.yaml` > `~/.syrch/config.yml` > `~/.syrch/config.yaml` (`--config <path>`가 모두 덮어씀)
 
 ### 환경변수
 
@@ -354,8 +354,17 @@ execution:
 | `SYRCH_MODEL` | `llm.model` | `gpt-4o` |
 | `SYRCH_API_KEY` | `llm.api_key` | `sk-...` |
 | `SYRCH_BASE_URL` | `llm.base_url` | `http://localhost:11434/v1` |
+| `SYRCH_LLM_PROVIDER` | `llm.provider` | `openai` |
+| `SYRCH_TEMPERATURE` | `llm.temperature` | `0.7` |
+| `SYRCH_MAX_TOKENS` | `llm.max_tokens_per_call` | `4096` |
+| `SYRCH_TIMEOUT` | `llm.timeout_seconds` | `120` |
+| `SYRCH_EXECUTOR` | `execution.executor_type` | `sqlite` |
 | `SYRCH_MAX_DEPTH` | `execution.max_depth` | `3` |
+| `SYRCH_MAX_ATTEMPTS` | `execution.max_attempts_per_node` | `3` |
+| `SYRCH_TOKEN_BUDGET` | `execution.token_budget` | `100000` |
 | `SYRCH_VERBOSE` | `execution.verbose` | `true` |
+| `SYRCH_CACHE` | `execution.cache_enabled` | `true` |
+| `SYRCH_CACHE_TTL` | `execution.cache_ttl` | `86400` |
 | `SYRCH_SEARCH_POLICY` | `execution.search_policy` | `beam` |
 | `SYRCH_BEAM_WIDTH` | `execution.beam_width` | `3` |
 | `SYRCH_CANDIDATE_BUDGET` | `execution.candidate_budget` | `8` |
@@ -364,6 +373,9 @@ execution:
 | `SYRCH_MAX_REPLANS` | `execution.max_replans` | `1` |
 | `SYRCH_CALIBRATION` | `execution.calibration_enabled` | `true` |
 | `SYRCH_MATERIALIZE_CONTEXT` | `execution.materialize_context` | `true` |
+| `SYRCH_INTERACTIVE` | `execution.interactive` | `true` |
+| `SYRCH_AMBIGUITY_THRESHOLD` | `execution.ambiguity_threshold` | `0.35` |
+| `SYRCH_MAX_CONCURRENCY` | `execution.max_concurrency` | `5` |
 
 ### Databricks 연결
 
@@ -376,6 +388,8 @@ execution:
 | `DATABRICKS_CLIENT_ID` | oauth/azure | OAuth 클라이언트 ID |
 | `DATABRICKS_CLIENT_SECRET` | oauth/azure | OAuth 클라이언트 시크릿 |
 | `AZURE_TENANT_ID` | azure | Azure AD 테넌트 ID |
+| `DATABRICKS_CATALOG` | 전체 | 카탈로그 이름 (선택) |
+| `DATABRICKS_SCHEMA` | 전체 | 스키마 이름 (선택) |
 
 ## 구조화된 로깅 (Structured Logging)
 
@@ -484,7 +498,7 @@ RLM 엔진은 플러그형 `SearchPolicy`(기본 `beam`, 또는 `exhaustive`)에
 
 기존의 "보정 신뢰도 ≥ 0.85 → 즉시 수락" 규칙을 대체합니다. 단순한 문제는 여전히 빠르게 해결되고(작은 풀), 모호한 문제는 예산 내에서 더 많은 후보를 탐색합니다.
 
-## 후보 범위 (Candidate Scope, S3)
+## 후보 범위 (Candidate Scope)
 
 각 RLM 시도는 명시적인 시도별 스키마 범위(`AttemptSchemaContext`)를 구성합니다:
 
@@ -510,22 +524,22 @@ JOIN  → PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
 
 설계 전체는 하나의 원칙에 기반합니다: **각 계층은 자기보다 위/아래 계층의 책임을 침범하지 않습니다.**
 
-| 모듈 | 핵심 질문 | 입력 | 출력 | 하면 안 되는 것 |
-| ---- | --------- | ---- | ---- | ------------- |
-| Planner | 무엇을 풀까? | Question + Schema | RequirementSpec + DAG | SQL 생성 / 정답 테이블 결정 |
-| Retriever | 어디를 찾아볼까? | Requirement + Semantic Index | Candidate Pool | 후보 최종 선택 |
-| SemanticIndex | 어떤 schema evidence가 있나? | DB metadata | semantic evidence | GT 주입 |
-| TaskDAG | 작업을 어떻게 나눌까? | RequirementSpec | DAG | SQL 생성 |
-| Scheduler | 어떤 순서로 실행할까? | DAG | Node execution | SQL 생성 / semantic 판단 |
-| ParentContext | 부모 결과를 어떻게 전달할까? | NodeResult | Context metadata + data | 의미 재판단 |
-| RLM | 어떻게 실행할까? | Node + Requirement + Scope | SQL candidates | DAG 재설계 |
-| Validator | SQL이 허용되는가? | SQL + Schema + Scope | Valid/Fail | 의미적 우열 판단 |
-| Executor | SQL을 실행하자 | Valid SQL | ExecutionResult | SQL 수정 |
-| Materializer | 부모 결과를 재사용 가능하게 만들자 | ParentContext | `_task_context_X` | 후보 선택 |
-| Evaluator | 후보가 요구사항을 만족하나? | Requirement + SQL + Result | CandidateEvaluation | 탐색 순서 결정 |
-| Selection | 어떤 후보를 채택할까? | CandidateEvaluations | Selected / AMBIGUOUS | 실행 순서로 결정 |
-| Replanner | 탐색을 다시 구성할까? | Failure / Ambiguity | Expanded/merged candidates | 기존 valid 후보 제거 |
-| Aggregator | 최종 답은 무엇인가? | NodeResults | Final Answer | 후보 재랭킹 |
+| 모듈 | 핵심 질문 | 입력 | 출력 |
+| ---- | --------- | ---- | ---- |
+| Planner | 무엇을 풀까? | Question + Schema | RequirementSpec + DAG |
+| Retriever | 어디를 찾아볼까? | Requirement + Semantic Index | Candidate Pool |
+| SemanticIndex | 어떤 schema evidence가 있나? | DB metadata | semantic evidence |
+| TaskDAG | 작업을 어떻게 나눌까? | RequirementSpec | DAG |
+| Scheduler | 어떤 순서로 실행할까? | DAG | Node execution |
+| ParentContext | 부모 결과를 어떻게 전달할까? | NodeResult | Context metadata + data |
+| RLM | 어떻게 실행할까? | Node + Requirement + Scope | SQL candidates |
+| Validator | SQL이 허용되는가? | SQL + Schema + Scope | Valid/Fail |
+| Executor | SQL을 실행하자 | Valid SQL | ExecutionResult |
+| Materializer | 부모 결과를 재사용 가능하게 만들자 | ParentContext | `_task_context_X` |
+| Evaluator | 후보가 요구사항을 만족하나? | Requirement + SQL + Result | CandidateEvaluation |
+| Selection | 어떤 후보를 채택할까? | CandidateEvaluations | Selected / AMBIGUOUS |
+| Replanner | 탐색을 다시 구성할까? | Failure / Ambiguity | Expanded/merged candidates |
+| Aggregator | 최종 답은 무엇인가? | NodeResults | Final Answer |
 
 네 가지 책임은 항상 분리됩니다:
 
@@ -606,7 +620,7 @@ SOLVED 노드의 결과는 실제 테이블 `_task_context_<id>`로 쓰여져 �
 실패는 "LLM이 못 풀었다"가 아니라 **정확히 어떤 계층의 책임인지**로 분류됩니다:
 
 ```
-RECALL        GT가 후보 풀에 없음            → Retriever / CandidatePolicy
+RECALL        기대 정답 테이블이 후보 풀에 없음 → Retriever / CandidatePolicy
 GENERATION    SQL 생성/검증 문제             → RLM / Validator
 CONTEXT       context 미가용/미소비/미사용   → ParentContext / materialization / scope
 SELECTION     viable 후보 중 잘못된 선택      → Evaluator / evidence sufficiency
@@ -622,9 +636,9 @@ SQL scope correctness → SQL execution → Evaluator selection →
 context_available → context_consumed → context_sql_usage → Final result
 ```
 
-- `GT ∉ pool`은 **Recall 실패**이지 Selection 실패가 아닙니다.
-- S3/S4는 `context_available → context_consumed → context_sql_usage →
-  result correctness`를 각각 측정합니다 (`eval/metrics.py`).
+- 기대 정답 테이블이 후보 풀에 없으면 **Recall 실패**이지 Selection 실패가 아닙니다.
+- context 사용은 `context_available → context_consumed → context_sql_usage →
+  result correctness`로 각각 측정됩니다 (`eval/metrics.py`).
 - 4-way 결과: `correct / justified_ambiguous / wrong / failed`.
 
 ## 테스트
@@ -651,16 +665,16 @@ python scripts/validate_real.py --level 3 --verbose
 python scripts/validate_real.py --question "Total revenue by year?" --db orders_10dim.sqlite
 
 # 로컬 모델 사용
-python scripts/validate_real.py --model qwen3.5-4b --max-concurrency 1
+python scripts/validate_real.py --model qwen3.5-4b-4bit
 
-# 결과 (2026-06-15, minimax-m3:cloud):
+# 결과 (2026-06-15, qwen3.5-4b-4bit):
 #   L1 Easy           3/3 PASS
 #   L2 Medium         3/3 PASS
 #   L3 Complex        2/2 PASS
 #   L4 Very Complex   2/2 PASS
 #   L5 Ambiguous      2/2 AMBIGUOUS (expected)
 #   ─────────────────────────────
-#   Total             10/10 PASS  100% (2 AMBIGUOUS)
+#   Total             10 PASS | 2 AMBIGUOUS (83.3% pass rate)
 ```
 
 ## 연구 배경
@@ -673,17 +687,3 @@ python scripts/validate_real.py --model qwen3.5-4b --max-concurrency 1
 - **AdaptOrch**: 토폴로지 인식 멀티에이전트 오케스트레이션 (병렬/순차/계층/혼합). [`paper`](https://arxiv.org/abs/2602.16873)
 - **DST**: 신뢰도 기반 가지치기를 사용한 적응형 트리 탐색 (26-75% 계산량 감소). [`paper`](https://arxiv.org/abs/2603.20267)
 - **LLM Compiler**: 의존성 그래프를 통한 병렬 태스트 스케줄링; syrch의 DAG 스케줄러 및 레이어별 실행과 밀접한 관련. [`paper`](https://arxiv.org/abs/2312.13311)
-
-## 공개 연구 질문
-
-| 질문 | 접근 방식 |
-|------|----------|
-| **분할을 언제 멈출까?** (단위 케이스 감지) | LLM 자체 평가 + 복잡도 휴리스틱 실험 |
-| **하위 태스크 결과를 어떻게 병합할까?** | DAG 기반 REPL 변수 전달 + Aggregator 역할 |
-| **탐색 공간을 어떻게 가지치기할까?** | 신뢰도 기반 가지치기 + 불확실성 인식 할당 |
-| **최적 D&C 전략은?** | DAG 구조 메트릭 기반 토폴로지 라우팅 (AdaptOrch) |
-| **최적 보정 가중치는?** | 신호별 패널티 계수에 대한 격자 탐색 |
-| **조인 키 추론?** | Planner가 sub-task 간 join_keys 생성 |
-| **재귀 분해?** | Planner가 비원자 sub-task에 재귀 적용 |
-| **SQL로 해결 불가능할 때?** | RLM 명확화: 모호성 점수 → 대화형 피드백 → 재분해 |
-| **최적 명확화 임계값은?** | 점수 가중치 + 결정 경계에 대한 격자 탐색 |
