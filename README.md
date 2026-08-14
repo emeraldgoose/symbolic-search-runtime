@@ -22,50 +22,54 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 ## Architecture
 
 ```
-User Question
-    │
-    ▼
-┌──────────────────────┐
-│    Retriever         │  ← Keyword scoring over all tables
-│  (keyword match)     │     outputs candidate pool (ordering only —
-│  + match_reason      │     never the final pick)
-└─────────┬────────────┘
-          │ candidate pool (scored tables)
-          ▼
-┌──────────────────────┐
-│  Schema-aware        │  ← LLM decomposes into TaskDAG
-│  Planner (D&C)       │     hint_tables: strong constraint
-│                      │     hint_columns: soft hint (verify)
-└─────────┬────────────┘
-          │ DAG + requirements per subtask
-          ▼
-┌──────────────────────┐
-│    Scheduler         │  ← Topological DAG execution
-│                      │     SOLVED → materialize context
-│                      │     AMBIGUOUS/FAILED/BLOCKED propagate
-│  For each node:      │
-│  ┌──────────────┐   │
-│  │ RLM Agent    │   │  ← per-candidate search loop:
-│  │ 1. candidate  │   │     best-first by retriever prior
-│  │ 2. generate   │   │     under beam/exhaustive policy
-│  │ 3. validate   │   │     (syntax → schema → scope)
-│  │ 4. execute    │   │
-│  │ 5. evaluate   │   │     CandidateEvaluation (5 signals)
-│  │ 6. select     │   │     lexicographic → SOLVED/AMBIGUOUS
-│  └──────────────┘   │
-│                     │
-│  replan_request ────→ Planner.replan() → expanded DAG
-└──────┬───────────────┘
-       │ NodeResults (DataFrames + SQL + confidence)
-       ▼
-┌──────────────────┐
-│   Aggregator     │  ← Picks primary leaf, NO re-ranking
-│                   │     adjusts confidence (ambiguity + heuristics)
-└──────┬───────────┘
-       │ FinalSolution
-       ▼
- Optimal Answer + SQL + Reasoning Trace
+                    USER QUESTION
+                         │
+                         ▼
+┌──────────────────────────────────────────┐
+│  Planner (D&C) — "what to solve?"        │
+│  Question → RequirementSpec + TaskDAG    │
+│  (each task: metrics, dims, grain,       │
+│   filters, supporting relations)         │
+└────────────────────┬─────────────────────┘
+                     │ requirements + task graph
+                     ▼
+┌──────────────────────────────────────────┐
+│  Retriever — "where to look?"            │
+│  scores every table → candidate pool     │
+│  (ordering only — never the final pick)  │
+└────────────────────┬─────────────────────┘
+                     │ candidate pool
+                     ▼
+┌──────────────────────────────────────────┐
+│  Scheduler — runs tasks in DAG order     │
+│                                         │
+│  for each node:                         │
+│  ┌───────────────────────────────────┐  │
+│  │  RLM Agent — "how to run it?"     │  │
+│  │  candidate → SQL → validate →     │  │
+│  │  execute → evaluate → select      │  │
+│  │  (beam/exhaustive, lexicographic) │  │
+│  └──────────────────┬────────────────┘  │
+└─────────────────────┼────────────────────┘
+                      │ SOLVED (best viable candidate)
+                      ▼
+┌──────────────────────────────────────────┐
+│  materialize → _task_context_<node_id>   │
+└────────────────────┬─────────────────────┘
+                     │ real table; dependents JOIN it
+                     ▼
+┌──────────────────────────────────────────┐
+│  Aggregator — "compose the answer"       │
+│  primary leaf, no re-ranking             │
+└────────────────────┬─────────────────────┘
+                     ▼
+        FINAL ANSWER + SQL + reasoning trace
 ```
+
+Node outcomes: `SOLVED` → a real `_task_context_<id>` table is materialized
+that dependent tasks can JOIN. `AMBIGUOUS` → **no materialization** (uncertain
+results are never made into a downstream fact). `FAILED`/`BLOCKED` →
+consumers short-circuit to `BLOCKED` without running SQL.
 
 ### How a Sub-Task Executes (RLM Node)
 
@@ -506,6 +510,47 @@ JOIN  → PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
 - Only *known physical* tables are enforced for drift; unknown tables surface as execution errors.
 - The candidate pool is the only source of join candidates — drift to an out-of-pool table is blocked.
 
+## Module Responsibilities
+
+The whole design rests on one principle: **each layer never invades the
+responsibility of the layers above or below it.**
+
+| Module | Core question | Input | Output | Must NOT do |
+|--------|---------------|-------|--------|-------------|
+| Planner | What to solve? | Question + Schema | RequirementSpec + DAG | Generate SQL / pick the answer table |
+| Retriever | Where to look? | Requirement + Semantic Index | Candidate Pool | Make the final candidate pick |
+| SemanticIndex | What schema evidence exists? | DB metadata | semantic evidence | Inject ground truth |
+| TaskDAG | How to split work? | RequirementSpec | DAG | Generate SQL |
+| Scheduler | In what order? | DAG | Node execution | Generate SQL / judge semantics |
+| ParentContext | How to pass parent results? | NodeResult | Context metadata + data | Re-judge meaning |
+| RLM | How to execute? | Node + Requirement + Scope | SQL candidates | Redesign the DAG |
+| Validator | Is the SQL allowed? | SQL + Schema + Scope | Valid/Fail | Judge semantic superiority |
+| Executor | Run the SQL | Valid SQL | ExecutionResult | Modify the SQL |
+| Materializer | Make parent results reusable | ParentContext | `_task_context_X` | Pick a candidate |
+| Evaluator | Does the candidate meet the requirement? | Requirement + SQL + Result | CandidateEvaluation | Decide search order |
+| Selection | Which candidate is adopted? | CandidateEvaluations | Selected / AMBIGUOUS | Tie-break by execution order |
+| Replanner | Reconfigure the search? | Failure / Ambiguity | Expanded/merged candidates | Drop existing valid candidates |
+| Aggregator | What is the final answer? | NodeResults | Final Answer | Re-rank candidates |
+
+Four responsibilities are always kept separate:
+
+```
+Planner     → "what to solve?"      (RequirementSpec + TaskDAG)
+RLM         → "how to execute?"     (SQL candidates per candidate scope)
+Evaluator   → "does it satisfy?"    (CandidateEvaluation signals)
+Aggregator  → "how to compose?"     (Final Answer, no re-ranking)
+```
+
+v0.3.5b adds a fifth layer between RLM and Aggregator:
+
+```
+Scheduler / Executor → "how to pass results between tasks?" (Context/Dataflow)
+```
+
+Node states: a dependency that is `FAILED`/`BLOCKED` short-circuits its
+consumers to `BLOCKED` (no SQL run); `AMBIGUOUS` never materializes a context,
+so uncertain results are never made into a downstream fact.
+
 ## Executor Abstraction
 
 All executors conform to `BaseExecutor`:
@@ -564,6 +609,32 @@ Generated by `scripts/gen_fixtures.py` into `tests/fixtures/`:
 |---------|------|------|-------------|
 | `wikipedia_clickstream.sqlite` | ~200 | ~36 KB | Aggregated Wikipedia clickstream data with mutual information metadata |
 | `orders_10dim.sqlite` | 1000+ | ~90 KB | Synthetic orders with 10 dimension columns |
+
+## Benchmark Breakdown
+
+Failures are attributed to a single layer, not "the LLM failed":
+
+```
+RECALL        GT not in the candidate pool        → Retriever / CandidatePolicy
+GENERATION    SQL generation / validation issues   → RLM / Validator
+CONTEXT       context not available/consumed/SQL  → ParentContext / materialization / scope
+SELECTION     wrong pick from viable candidates    → Evaluator / evidence sufficiency
+PLANNER       wrong decomposition / requirement    → RequirementSpec / TaskDAG
+AGGREGATION   wrong final composition             → Aggregator
+```
+
+Per-problem diagnostics track the whole chain:
+
+```
+Question → Planner correctness → Retriever recall → Candidate generation →
+SQL scope correctness → SQL execution → Evaluator selection →
+context_available → context_consumed → context_sql_usage → Final result
+```
+
+- `GT ∉ pool` is a **Recall failure**, not a Selection failure.
+- S3/S4 report `context_available → context_consumed → context_sql_usage →
+  result correctness` separately (see `eval/metrics.py`).
+- 4-way outcome: `correct / justified_ambiguous / wrong / failed`.
 
 ## Testing
 

@@ -22,50 +22,54 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 ## 아키텍처
 
 ```
-User Question
-    │
-    ▼
-┌──────────────────────┐
-│    Retriever         │  ← 키워드 매칭으로 전체 테이블 점수화
-│  (keyword match)     │     후보 풀 출력 (ordering 전용 —
-│  + match_reason      │     최종 선택은 하지 않음)
-└─────────┬────────────┘
-          │ 후보 풀 (점수화된 테이블)
-          ▼
-┌──────────────────────┐
-│  Schema-aware        │  ← LLM이 TaskDAG로 분해
-│  Planner (D&C)       │     hint_tables: 강한 제약
-│                      │     hint_columns: 소프트 힌트 (검증)
-└─────────┬────────────┘
-          │ DAG + sub-task별 요구사항
-          ▼
-┌──────────────────────┐
-│    Scheduler         │  ← 위상 정렬 DAG 실행
-│                      │     SOLVED → context materialize
-│                      │     AMBIGUOUS/FAILED/BLOCKED 전파
-│  각 노드:            │
-│  ┌──────────────┐   │
-│  │ RLM Agent    │   │  ← 후보별 탐색 루프:
-│  │ 1. 후보      │   │     retriever prior best-first
-│  │ 2. 생성      │   │     beam/exhaustive 정책 하에서
-│  │ 3. 검증      │   │     (구문 → 스키마 → 범위)
-│  │ 4. 실행      │   │
-│  │ 5. 평가      │   │     CandidateEvaluation (5개 신호)
-│  │ 6. 선택      │   │     사전식 → SOLVED/AMBIGUOUS
-│  └──────────────┘   │
-│                     │
-│  replan_request ────→ Planner.replan() → 확장된 DAG
-└──────┬───────────────┘
-       │ NodeResults (DataFrames + SQL + confidence)
-       ▼
-┌──────────────────┐
-│   Aggregator     │  ← primary 리프 선택, 재랭킹 없음
-│                   │     confidence 조정 (모호성 + 휴리스틱)
-└──────┬───────────┘
-       │ FinalSolution
-       ▼
- Optimal Answer + SQL + Reasoning Trace
+                    USER QUESTION
+                         │
+                         ▼
+┌──────────────────────────────────────────┐
+│  Planner (D&C) — "무엇을 풀까?"          │
+│  Question → RequirementSpec + TaskDAG    │
+│  (각 task: metrics, dims, grain,         │
+│   filters, supporting relations)         │
+└────────────────────┬─────────────────────┘
+                     │ 요구사항 + task 그래프
+                     ▼
+┌──────────────────────────────────────────┐
+│  Retriever — "어디를 찾아볼까?"           │
+│  전체 테이블 점수화 → 후보 풀            │
+│  (ordering 전용 — 최종 선택은 하지 않음)  │
+└────────────────────┬─────────────────────┘
+                     │ 후보 풀
+                     ▼
+┌──────────────────────────────────────────┐
+│  Scheduler — DAG 순서대로 task 실행      │
+│                                         │
+│  각 노드:                               │
+│  ┌───────────────────────────────────┐  │
+│  │  RLM Agent — "어떻게 실행할까?"    │  │
+│  │  candidate → SQL → 검증 → 실행 →  │  │
+│  │  평가 → 선택                       │  │
+│  │  (beam/exhaustive, 사전식)         │  │
+│  └──────────────────┬────────────────┘  │
+└─────────────────────┼────────────────────┘
+                      │ SOLVED (최선의 viable 후보)
+                      ▼
+┌──────────────────────────────────────────┐
+│  materialize → _task_context_<node_id>   │
+└────────────────────┬─────────────────────┘
+                     │ 실제 테이블; 하위 task가 JOIN
+                     ▼
+┌──────────────────────────────────────────┐
+│  Aggregator — "답을 어떻게 구성할까?"     │
+│  primary leaf, 재랭킹 없음                │
+└────────────────────┬─────────────────────┘
+                     ▼
+        FINAL ANSWER + SQL + reasoning trace
 ```
+
+노드 결과: `SOLVED` → 실제 `_task_context_<id>` 테이블로 materialize되어 하위 task가
+JOIN할 수 있습니다. `AMBIGUOUS` → **materialize하지 않음** (불확실한 결과는
+downstream의 사실이 되지 않습니다). `FAILED`/`BLOCKED` → 하위 노드는 SQL 실행
+없이 `BLOCKED`로 단락됩니다.
 
 ### 하위 태스크 실행 방식 (RLM 노드)
 
@@ -502,6 +506,44 @@ JOIN  → PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
 - drift 방지는 *알려진 물리* 테이블에만 적용됩니다; 미지 테이블은 실행 오류로 표면화됩니다.
 - 후보 풀이 JOIN 후보의 유일한 소스 — 풀 밖 테이블로의 drift는 차단됩니다.
 
+## 모듈별 책임 (Module Responsibilities)
+
+설계 전체는 하나의 원칙에 기반합니다: **각 계층은 자기보다 위/아래 계층의 책임을 침범하지 않습니다.**
+
+| 모듈 | 핵심 질문 | 입력 | 출력 | 하면 안 되는 것 |
+| ---- | --------- | ---- | ---- | ------------- |
+| Planner | 무엇을 풀까? | Question + Schema | RequirementSpec + DAG | SQL 생성 / 정답 테이블 결정 |
+| Retriever | 어디를 찾아볼까? | Requirement + Semantic Index | Candidate Pool | 후보 최종 선택 |
+| SemanticIndex | 어떤 schema evidence가 있나? | DB metadata | semantic evidence | GT 주입 |
+| TaskDAG | 작업을 어떻게 나눌까? | RequirementSpec | DAG | SQL 생성 |
+| Scheduler | 어떤 순서로 실행할까? | DAG | Node execution | SQL 생성 / semantic 판단 |
+| ParentContext | 부모 결과를 어떻게 전달할까? | NodeResult | Context metadata + data | 의미 재판단 |
+| RLM | 어떻게 실행할까? | Node + Requirement + Scope | SQL candidates | DAG 재설계 |
+| Validator | SQL이 허용되는가? | SQL + Schema + Scope | Valid/Fail | 의미적 우열 판단 |
+| Executor | SQL을 실행하자 | Valid SQL | ExecutionResult | SQL 수정 |
+| Materializer | 부모 결과를 재사용 가능하게 만들자 | ParentContext | `_task_context_X` | 후보 선택 |
+| Evaluator | 후보가 요구사항을 만족하나? | Requirement + SQL + Result | CandidateEvaluation | 탐색 순서 결정 |
+| Selection | 어떤 후보를 채택할까? | CandidateEvaluations | Selected / AMBIGUOUS | 실행 순서로 결정 |
+| Replanner | 탐색을 다시 구성할까? | Failure / Ambiguity | Expanded/merged candidates | 기존 valid 후보 제거 |
+| Aggregator | 최종 답은 무엇인가? | NodeResults | Final Answer | 후보 재랭킹 |
+
+네 가지 책임은 항상 분리됩니다:
+
+```
+Planner     → "무엇을 풀까?"   (RequirementSpec + TaskDAG)
+RLM         → "어떻게 실행할까?" (후보 범위별 SQL candidates)
+Evaluator   → "만족하나?"      (CandidateEvaluation 신호)
+Aggregator  → "어떻게 구성할까?" (Final Answer, 재랭킹 없음)
+```
+
+v0.3.5b에서 RLM과 Aggregator 사이에 다섯 번째 계층이 추가됐습니다:
+
+```
+Scheduler / Executor → "Task 간 결과를 어떻게 전달할까?" (Context/Dataflow)
+```
+
+노드 상태: 의존성이 `FAILED`/`BLOCKED`이면 하위 노드는 SQL 실행 없이 `BLOCKED`로 단락됩니다. `AMBIGUOUS`는 context를 materialize하지 않으므로 불확실한 결과가 downstream의 사실이 되지 않습니다.
+
 ## Executor 추상화
 
 모든 Executor는 `BaseExecutor`를 따릅니다:
@@ -558,6 +600,32 @@ SOLVED 노드의 결과는 실제 테이블 `_task_context_<id>`로 쓰여져 �
 |---------|------|------|------|
 | `wikipedia_clickstream.sqlite` | ~200 | ~36 KB | 위키백과 클릭스트림 집계 데이터 |
 | `orders_10dim.sqlite` | 1000+ | ~90 KB | 합성 주문 데이터 (10개 차원 컬럼) |
+
+## Benchmark 계층 분리
+
+실패는 "LLM이 못 풀었다"가 아니라 **정확히 어떤 계층의 책임인지**로 분류됩니다:
+
+```
+RECALL        GT가 후보 풀에 없음            → Retriever / CandidatePolicy
+GENERATION    SQL 생성/검증 문제             → RLM / Validator
+CONTEXT       context 미가용/미소비/미사용   → ParentContext / materialization / scope
+SELECTION     viable 후보 중 잘못된 선택      → Evaluator / evidence sufficiency
+PLANNER       잘못된 분해/요구사항           → RequirementSpec / TaskDAG
+AGGREGATION   잘못된 최종 구성              → Aggregator
+```
+
+문제별 진단은 전체 체인을 추적합니다:
+
+```
+Question → Planner correctness → Retriever recall → Candidate generation →
+SQL scope correctness → SQL execution → Evaluator selection →
+context_available → context_consumed → context_sql_usage → Final result
+```
+
+- `GT ∉ pool`은 **Recall 실패**이지 Selection 실패가 아닙니다.
+- S3/S4는 `context_available → context_consumed → context_sql_usage →
+  result correctness`를 각각 측정합니다 (`eval/metrics.py`).
+- 4-way 결과: `correct / justified_ambiguous / wrong / failed`.
 
 ## 테스트
 
