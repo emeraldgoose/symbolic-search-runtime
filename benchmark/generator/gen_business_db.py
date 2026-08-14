@@ -160,7 +160,8 @@ def generate(profile_name: str, backends: list[str] | None = None, verify: bool 
             n_rows = 0
             batch_dfs: list[pd.DataFrame] = []
             for batch_df in generate_table(rng, table_def, batch_size, fk_registry):
-                batch_df = apply_all_quality(batch_df, quality_config, rng)
+                if table_def.grain != "date":
+                    batch_df = apply_all_quality(batch_df, quality_config, rng)
                 for be in active_backends:
                     be.write_batch(table_def.name, batch_df)
                 batch_dfs.append(batch_df)

@@ -39,7 +39,7 @@ if _src.exists():
     sys.path.insert(0, str(_src))
 
 from syrch import query
-from benchmark.evaluator.errors import classify, summarize
+from benchmark.evaluator.errors import classify, _data_only_match, classify_outcome
 
 
 _PROFILES_DIR = _repo_root / "benchmark" / "profiles"
@@ -58,6 +58,7 @@ class QuestionResult:
     planner: dict = field(default_factory=dict)
     sql: dict = field(default_factory=dict)
     errors: list[dict] = field(default_factory=list)
+    outcome: str = "wrong"
     duration: float = 0.0
 
 
@@ -290,7 +291,6 @@ def run_benchmark(
         db_path = fqns
 
     ground_truth = load_ground_truth(questions_name, gt_dir=gt_dir)
-    gt_summary = load_ground_truth_summary(questions_name)
 
     if quick:
         questions = [q for q in questions if q.get("escalation_level", 1) <= 2]
@@ -337,6 +337,7 @@ def run_benchmark(
                 exec_error = None
 
                 print(f"  Confidence: {sr.confidence:.3f}, Tokens: {sr.token_cost}, Time: {duration:.1f}s")
+                print(f"  SQL: {result_sql}")
                 print(f"  Tables: {tables_used}")
                 print(f"  DAG nodes: {len(dag_nodes)}")
 
@@ -364,10 +365,33 @@ def run_benchmark(
             execution_error=exec_error,
         )
 
-        error_summary = summarize([errors])
         for e in errors:
             if e["type"] != "none":
                 print(f"  ⚠ {e['type']}: {e['detail']}")
+
+        outcome = classify_outcome(
+            question=q,
+            ground_truth_df=gt_df,
+            result_df=result_df,
+            result_sql=result_sql,
+            tables_used=tables_used,
+            execution_error=exec_error,
+        )
+
+        if outcome == "justified_ambiguous":
+            # A justified ambiguous outcome is NOT a failure: the chosen
+            # alternative source is declared defensible by the question, so
+            # the derived missing-GT / wrong-table errors are expected noise.
+            filtered: list[dict] = []
+            for e in errors:
+                if e["type"] == "wrong_table":
+                    continue
+                if e["type"] == "retriever_error" and "Missing required tables" in e["detail"]:
+                    continue
+                filtered.append(e)
+            if not filtered:
+                filtered.append({"type": "none", "detail": "Justified ambiguous source selection"})
+            errors = filtered
 
         required_tables = set(q.get("required_tables", []))
         used = set(tables_used)
@@ -400,6 +424,7 @@ def run_benchmark(
         sql_metrics = {
             "execution_success": exec_error is None,
             "result_match": result_df is not None and gt_df is not None and _dataframes_match(result_df, gt_df),
+            "data_match": result_df is not None and gt_df is not None and _data_only_match(result_df, gt_df),
             "confidence": q_confidence,
             "token_cost": q_token_cost,
             "ground_truth_rows": gt_rows,
@@ -415,6 +440,7 @@ def run_benchmark(
             planner=planner_metrics,
             sql=sql_metrics,
             errors=errors,
+            outcome=outcome,
             duration=duration,
         )
         results.append(qr)
@@ -432,6 +458,7 @@ def print_summary(results: list[QuestionResult]) -> None:
     retriever_precisions = [r.retriever["precision"] for r in results]
     sql_success = sum(1 for r in results if r.sql["execution_success"])
     sql_match = sum(1 for r in results if r.sql.get("result_match"))
+    sql_data_match = sum(1 for r in results if r.sql.get("data_match"))
     total_conf = sum(r.sql["confidence"] for r in results if r.sql["execution_success"])
     total_tokens = sum(r.sql["token_cost"] for r in results)
     total_time = sum(r.duration for r in results)
@@ -446,38 +473,56 @@ def print_summary(results: list[QuestionResult]) -> None:
     print(f"  Avg time/q:   {total_time/max(total,1):.1f}s")
     print(f"  Total tokens: {total_tokens}")
 
-    print(f"\n  ── Retriever ──")
+    print("\n  ── Retriever ──")
     print(f"  Avg Recall:    {sum(retriever_recalls)/max(total,1):.3f}")
     print(f"  Avg Precision: {sum(retriever_precisions)/max(total,1):.3f}")
 
-    print(f"\n  ── Planner ──")
+    print("\n  ── Planner ──")
     minimal_count = sum(1 for r in results if r.planner.get("is_minimal"))
     print(f"  Minimal DAG:   {minimal_count}/{total}")
 
-    print(f"\n  ── SQL ──")
+    print("\n  ── SQL ──")
     print(f"  Execution:     {sql_success}/{total}")
-    print(f"  Result Match:  {sql_match}/{total}")
+    print(f"  Strict Match:  {sql_match}/{total}")
+    print(f"  Data Match:    {sql_data_match}/{total}")
     print(f"  Avg Confidence: {total_conf/max(sql_success,1):.3f}")
 
+    outcome_counts = {k: 0 for k in ("correct", "justified_ambiguous", "wrong", "failed")}
+    for r in results:
+        outcome_counts[r.outcome] = outcome_counts.get(r.outcome, 0) + 1
+    print("\n  ── Outcome ──")
+    print(f"  correct:              {outcome_counts['correct']}/{total}")
+    print(f"  justified_ambiguous:  {outcome_counts['justified_ambiguous']}/{total}")
+    print(f"  wrong:                {outcome_counts['wrong']}/{total}")
+    print(f"  failed:               {outcome_counts['failed']}/{total}")
+
     if error_counts:
-        print(f"\n  ── Error Distribution ──")
+        print("\n  ── Error Distribution ──")
         for etype, count in sorted(error_counts.items(), key=lambda x: -x[1]):
             print(f"  {etype:<20} {count}")
 
     print()
 
-    print(f"  {'ID':<6} {'RetR':>5} {'RetP':>5} {'DAG':>4} {'Exec':>5} {'Match':>5} {'Conf':>5} {'Tok':>5} {'Time':>5}")
-    print(f"  {'─'*6} {'─'*5} {'─'*5} {'─'*4} {'─'*5} {'─'*5} {'─'*5} {'─'*5} {'─'*5}")
+    print(f"  {'ID':<6} {'Out':<6} {'RetR':>5} {'RetP':>5} {'DAG':>4} {'Exec':>5} {'Strict':>6} {'Data':>5} {'Conf':>5} {'Tok':>5} {'Time':>5}")
+    print(f"  {'─'*6} {'─'*6} {'─'*5} {'─'*5} {'─'*4} {'─'*5} {'─'*6} {'─'*5} {'─'*5} {'─'*5} {'─'*5}")
+    out_abbrev = {
+        "correct": "OK",
+        "justified_ambiguous": "JA",
+        "wrong": "WR",
+        "failed": "FL",
+    }
     for r in results:
+        out_s = out_abbrev.get(r.outcome, r.outcome)
         rr = f"{r.retriever['recall']:.2f}"
         rp = f"{r.retriever['precision']:.2f}"
         dag = f"{r.planner['node_count']}"
         exec_s = "✓" if r.sql["execution_success"] else "✗"
-        match_s = "✓" if r.sql.get("result_match") else "•" if r.sql["execution_success"] else " "
+        strict_s = "✓" if r.sql.get("result_match") else "•" if r.sql["execution_success"] else " "
+        data_s = "✓" if r.sql.get("data_match") else "•" if r.sql["execution_success"] else " "
         conf = f"{r.sql['confidence']:.2f}"
         tok = str(r.sql["token_cost"])
         dur = f"{r.duration:.1f}"
-        print(f"  {r.id:<6} {rr:>5} {rp:>5} {dag:>4} {exec_s:>5} {match_s:>5} {conf:>5} {tok:>5} {dur:>5}s")
+        print(f"  {r.id:<6} {out_s:<6} {rr:>5} {rp:>5} {dag:>4} {exec_s:>5} {strict_s:>6} {data_s:>5} {conf:>5} {tok:>5} {dur:>5}s")
 
     print("=" * 70)
 
