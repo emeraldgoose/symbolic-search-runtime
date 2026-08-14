@@ -84,67 +84,6 @@ def _generate_column(rng: np.random.Generator, col: ColumnDef, n: int,
     return pd.Series([f"v_{i:05d}" for i in range(n)])
 
 
-import datetime as _dt  # noqa: E402
-
-
-def _holiday_set() -> set[tuple[int, int]]:
-    """Real fixed-date holidays (KR + major international)."""
-    return {
-        (1, 1), (1, 2), (3, 1), (5, 5), (6, 6), (8, 15), (10, 3), (10, 9), (12, 25),
-    }
-
-
-def _season(month: int) -> str:
-    if month in (3, 4, 5):
-        return "Spring"
-    if month in (6, 7, 8):
-        return "Summer"
-    if month in (9, 10, 11):
-        return "Fall"
-    return "Winter"
-
-
-def generate_date_dimension(table: TableDef, start: int = 0, count: int | None = None) -> pd.DataFrame:
-    """Generate a real calendar for a date-grain dimension table.
-
-    The first ``count`` rows start at 2022-01-01. Column values are derived
-    from the actual date instead of random generation, so ``date_key`` can be
-    joined against DATE columns and ``year``/``month``/``is_holiday`` are real.
-    """
-    n = table.rows
-    if count is None:
-        count = n
-    start_date = _dt.date(2022, 1, 1)
-    holidays = _holiday_set()
-    data: dict[str, Any] = {}
-    for col in table.columns:
-        col_name = col.name
-        values: list[Any] = []
-        for i in range(start, start + count):
-            d = start_date + _dt.timedelta(days=i)
-            if col_name == "date_key":
-                values.append(d.strftime("%Y-%m-%d"))
-            elif col_name == "year":
-                values.append(d.year)
-            elif col_name == "quarter":
-                values.append((d.month - 1) // 3 + 1)
-            elif col_name == "month":
-                values.append(d.month)
-            elif col_name == "day_of_week":
-                values.append(d.weekday())
-            elif col_name == "is_weekend":
-                values.append(d.weekday() >= 5)
-            elif col_name == "is_holiday":
-                values.append((d.month, d.day) in holidays)
-            elif col_name == "season":
-                values.append(_season(d.month))
-            else:
-                # Unknown columns in a date dimension fall back to raw values.
-                values.append(f"v_{i:05d}")
-        data[col.name] = values
-    return pd.DataFrame(data)
-
-
 def generate_table(
     rng: np.random.Generator,
     table: TableDef,
@@ -154,13 +93,6 @@ def generate_table(
     n = table.rows
     if batch_size <= 0:
         batch_size = n
-
-    if table.grain == "date":
-        # Calendar dimensions are fully deterministic (no RNG) and span
-        # 2022-01-01 + table.rows days.
-        for start in range(0, n, batch_size):
-            yield generate_date_dimension(table, start, min(batch_size, n - start))
-        return
 
     start = 0
     while start < n:

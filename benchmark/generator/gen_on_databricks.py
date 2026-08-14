@@ -143,8 +143,7 @@ for table_def in all_tables_sorted:
     n_rows = 0
     batch_dfs = []
     for batch_df in generate_table(rng, table_def, batch_size, fk_registry):
-        if table_def.grain != "date":
-            batch_df = apply_all_quality(batch_df, quality_config, rng)
+        batch_df = apply_all_quality(batch_df, quality_config, rng)
         sdf = spark.createDataFrame(batch_df)
         sdf.write.format("delta").mode("append").saveAsTable(tb_name)
         batch_dfs.append(batch_df)
