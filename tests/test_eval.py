@@ -75,7 +75,7 @@ def test_pipeline_runner():
     executor = FakeExecutor()
     config = ExecutionConfig(
         question="test", db_path=":memory:",
-        max_depth=2, max_attempts_per_node=1, high_confidence=0.85,
+        max_depth=2, max_attempts_per_node=1,
     )
     schema = executor.get_schema()
     problem = ProblemSpec(question="test", schema=schema)
@@ -213,7 +213,7 @@ def test_pipeline_with_real_db():
 
     config = ExecutionConfig(
         question="test", db_path=db_path,
-        max_depth=2, max_attempts_per_node=1, high_confidence=0.85,
+        max_depth=2, max_attempts_per_node=1,
     )
 
     llm = FakeLLM()
@@ -337,3 +337,112 @@ def test_aggregator_try_join_merge_no_match_returns_none():
     }
     merged = agg._try_join_merge(["A", "B"], results, [])
     assert merged is None
+
+
+def test_aggregator_trusts_selected_candidate():
+    """The Aggregator never re-ranks: it picks the leaf whose OWN selected
+    candidate carries the stronger evidence, even against higher confidence."""
+    from syrch.search.aggregator import Aggregator
+    from syrch.core.models import (
+        CandidateEvaluation, NodeResult, NodeStatus, TaskDAG, TaskNode,
+    )
+
+    class FakeNullLLM:
+        def generate(self, *a, **kw):
+            return type("R", (), {"content": "ok", "model": "t", "usage": {"completion_tokens": 1}})()
+        def generate_json(self, *a, **kw):
+            return {}
+
+    llm = FakeNullLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    agg = Aggregator(llm, None, config)
+
+    # A: SOLVED but weak evidence (low semantic_match) and lower confidence
+    a_sel = CandidateEvaluation(
+        table="a", ok=True, execution_valid=True, requirement_pass=True,
+        semantic_match=0.5, result_quality=0.9, structural_match=1.0,
+        cost_tokens=10, candidate_id="a", confidence=0.6,
+        has_data=True,
+    )
+    node_a = NodeResult(
+        node_id="A", data=pd.DataFrame({"v": [10]}), sql="SELECT * FROM a",
+        confidence=0.6, status=NodeStatus.SOLVED, selected_candidate=a_sel,
+        candidates=[a_sel],
+    )
+    # B: strong evidence despite lower confidence
+    b_sel = CandidateEvaluation(
+        table="b", ok=True, execution_valid=True, requirement_pass=True,
+        semantic_match=0.9, result_quality=0.7, structural_match=1.0,
+        cost_tokens=20, candidate_id="b", confidence=0.5,
+        has_data=True,
+    )
+    node_b = NodeResult(
+        node_id="B", data=pd.DataFrame({"v": [20]}), sql="SELECT * FROM b",
+        confidence=0.5, status=NodeStatus.SOLVED, selected_candidate=b_sel,
+        candidates=[b_sel],
+    )
+
+    dag = TaskDAG(
+        nodes={
+            "A": TaskNode(id="A", description="a", depends_on=[], is_atomic=True),
+            "B": TaskNode(id="B", description="b", depends_on=[], is_atomic=True),
+        },
+        root_id="A",
+        topo_layers=[["A", "B"]],
+    )
+    sol = agg.merge("test", dag, {"A": node_a, "B": node_b})
+
+    assert sol.data is not None
+    assert list(sol.data["v"]) == [20]  # B's stronger evidence wins
+    assert sol.sql == "SELECT * FROM a\n\nSELECT * FROM b"
+
+
+def test_aggregator_failed_leaf_falls_back_to_solved_dependency():
+    """TC6 regression: a leaf that FAILED with no data must not zero out the
+    solution; the best SOLVED node's data is surfaced and the FAILED leaf
+    still penalizes confidence."""
+    from syrch.search.aggregator import Aggregator
+    from syrch.core.models import (
+        CandidateEvaluation, NodeResult, NodeStatus, TaskDAG, TaskNode,
+    )
+
+    class FakeNullLLM:
+        def generate(self, *a, **kw):
+            return type("R", (), {"content": "ok", "model": "t", "usage": {"completion_tokens": 1}})()
+        def generate_json(self, *a, **kw):
+            return {}
+
+    llm = FakeNullLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    agg = Aggregator(llm, None, config)
+
+    failed = NodeResult(
+        node_id="B", data=pd.DataFrame(), sql="",
+        confidence=0.0, status=NodeStatus.FAILED, error="boom",
+    )
+    sel = CandidateEvaluation(
+        table="a", ok=True, execution_valid=True, requirement_pass=True,
+        semantic_match=0.9, result_quality=0.8, structural_match=1.0,
+        cost_tokens=10, candidate_id="a", confidence=0.8, has_data=True,
+    )
+    solved = NodeResult(
+        node_id="A", data=pd.DataFrame({"v": [42]}), sql="SELECT * FROM a",
+        confidence=0.8, status=NodeStatus.SOLVED, selected_candidate=sel,
+        candidates=[sel],
+    )
+
+    dag = TaskDAG(
+        nodes={
+            "A": TaskNode(id="A", description="a", depends_on=[], is_atomic=True),
+            "B": TaskNode(id="B", description="b", depends_on=["A"], is_atomic=True),
+        },
+        root_id="A",
+        topo_layers=[["A"], ["B"]],
+    )
+    sol = agg.merge("test", dag, {"A": solved, "B": failed})
+
+    assert sol.data is not None
+    assert list(sol.data["v"]) == [42]  # fallback surfaced A's evidence
+    assert sol.confidence > 0.0
+    # The FAILED leaf lowers confidence below the pure-solved level
+    assert sol.confidence < 0.8

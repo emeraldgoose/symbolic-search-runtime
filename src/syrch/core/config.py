@@ -24,12 +24,18 @@ class ExecutionConfig:
     executor_type: str = "sqlite"
     max_depth: int = 3
     max_attempts_per_node: int = 3
-    high_confidence: float = 0.85
+    search_policy: str = "beam"
+    beam_width: int = 3
+    candidate_budget: int = 8
+    stop_margin: float = 0.15
+    max_candidate_expansion: int = 2
+    max_replans: int = 1
     token_budget: int = 100_000
     verbose: bool = False
     cache_enabled: bool = True
     cache_ttl: int = 86400
     calibration_enabled: bool = True
+    materialize_context: bool = True
     interactive: bool = False
     ambiguity_threshold: float = 0.35
     max_concurrency: int = 5
@@ -83,12 +89,18 @@ _ENV_MAP: dict[str, str] = {
     "executor_type": "SYRCH_EXECUTOR",
     "max_depth": "SYRCH_MAX_DEPTH",
     "max_attempts_per_node": "SYRCH_MAX_ATTEMPTS",
-    "high_confidence": "SYRCH_HIGH_CONFIDENCE",
+    "search_policy": "SYRCH_SEARCH_POLICY",
+    "beam_width": "SYRCH_BEAM_WIDTH",
+    "candidate_budget": "SYRCH_CANDIDATE_BUDGET",
+    "stop_margin": "SYRCH_STOP_MARGIN",
+    "max_candidate_expansion": "SYRCH_MAX_CANDIDATE_EXPANSION",
+    "max_replans": "SYRCH_MAX_REPLANS",
     "token_budget": "SYRCH_TOKEN_BUDGET",
     "verbose": "SYRCH_VERBOSE",
     "cache_enabled": "SYRCH_CACHE",
     "cache_ttl": "SYRCH_CACHE_TTL",
     "calibration_enabled": "SYRCH_CALIBRATION",
+    "materialize_context": "SYRCH_MATERIALIZE_CONTEXT",
     "interactive": "SYRCH_INTERACTIVE",
     "ambiguity_threshold": "SYRCH_AMBIGUITY_THRESHOLD",
     "max_concurrency": "SYRCH_MAX_CONCURRENCY",

@@ -20,9 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import traceback
 from dataclasses import dataclass, field
-from typing import Any
 
 from syrch.core.config import ExecutionConfig, LLMConfig
 from syrch.core.models import (
@@ -404,7 +402,10 @@ def _handle_interactive_clarification(
         executor_type=config.executor_type,
         max_depth=config.max_depth,
         max_attempts_per_node=config.max_attempts_per_node,
-        high_confidence=config.high_confidence,
+        search_policy=config.search_policy,
+        beam_width=config.beam_width,
+        candidate_budget=config.candidate_budget,
+        stop_margin=config.stop_margin,
         token_budget=config.token_budget,
         verbose=config.verbose,
         cache_enabled=False,  # Don't cache the re-run

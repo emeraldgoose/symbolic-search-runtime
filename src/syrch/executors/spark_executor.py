@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from syrch.core.models import ColumnSchema, TableSchema
+from syrch.core.models import ColumnSchema, TableSchema, infer_layer
 from syrch.executors.base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -73,8 +73,15 @@ class SparkExecutor(BaseExecutor):
                 rows = self._spark.sql(f"DESCRIBE {table_name}").collect()
             else:
                 raise
-        columns = [ColumnSchema(name=r.col_name, type=r.data_type) for r in rows]
-        return TableSchema(name=table_name, columns=columns)
+        columns = [
+            ColumnSchema(
+                name=r.col_name,
+                type=r.data_type,
+                description=str(r.comment).strip() if r.comment and str(r.comment).strip() else None,
+            )
+            for r in rows
+        ]
+        return TableSchema(name=table_name, columns=columns, layer=infer_layer(table_name))
 
     def list_tables(self) -> list[str]:
         if self._tables:
@@ -92,7 +99,25 @@ class SparkExecutor(BaseExecutor):
                 rows = self._spark.sql("SHOW TABLES").collect()
             else:
                 raise
-        return sorted({r.tableName for r in rows})
+        return sorted({r.tableName for r in rows if not r.tableName.startswith("_task_context_")})
+
+    def materialize_context(self, context) -> str:
+        table = context.table_name
+        try:
+            self._spark.sql(f"DROP VIEW IF EXISTS {table}")
+        except Exception:
+            pass
+        if context.data is None or context.data.empty:
+            return table
+        df = self._spark.createDataFrame(context.data)
+        df.createOrReplaceTempView(table)
+        return table
+
+    def drop_context(self, table_name: str) -> None:
+        try:
+            self._spark.sql(f"DROP VIEW IF EXISTS {table_name}")
+        except Exception:
+            pass
 
     def close(self) -> None:
         pass

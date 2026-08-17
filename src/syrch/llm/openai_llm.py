@@ -15,6 +15,40 @@ _INITIAL_BACKOFF = 1.0
 _BACKOFF_MULTIPLIER = 2.0
 
 
+def _message_content(message) -> str:
+    """Extract assistant text, falling back to tool-call arguments.
+
+    Reasoning models (e.g. LFM 2.5 on rapid-mlx) can emit their answer as a
+    tool call (`sql_query(query=...)`) while leaving `message.content` empty.
+    Without this fallback every such response was read as "empty SQL".
+    """
+    content = getattr(message, "content", None) or ""
+    if content.strip():
+        return content
+    tool_calls = getattr(message, "tool_calls", None) or []
+    parts: list[str] = []
+    for tc in tool_calls:
+        fn = getattr(tc, "function", None)
+        raw = (getattr(fn, "arguments", None) or "") if fn is not None else ""
+        if not raw.strip():
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parts.append(raw)
+            continue
+        if isinstance(parsed, dict):
+            for key in ("query", "sql", "statement"):
+                if key in parsed:
+                    parts.append(str(parsed[key]))
+                    break
+            else:
+                parts.append(json.dumps(parsed))
+        else:
+            parts.append(str(parsed))
+    return "\n".join(parts)
+
+
 def _rate_limit_retry(fn, *args, **kwargs):
     last_exc = None
     delay = _INITIAL_BACKOFF
@@ -53,7 +87,7 @@ class OpenAILLM(BaseLLM):
         )
         choice = response.choices[0]
         return LLMResponse(
-            content=choice.message.content or "",
+            content=_message_content(choice.message),
             model=response.model,
             usage={
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
@@ -83,7 +117,7 @@ class OpenAILLM(BaseLLM):
             response = _rate_limit_retry(
                 self.client.chat.completions.create, **kw, messages=messages,
             )
-        content = response.choices[0].message.content
+        content = _message_content(response.choices[0].message)
         if not content or not content.strip():
             return {}
         try:

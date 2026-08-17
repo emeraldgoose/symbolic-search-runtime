@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from syrch.core.models import ColumnSchema, TableSchema
+from syrch.core.models import ColumnSchema, TableSchema, infer_layer
 from syrch.executors.base import BaseExecutor
 
 
@@ -31,12 +31,19 @@ class JDBCExecutor(BaseExecutor):
         assert self._conn is not None
         if table_name is None:
             table_name = self.list_tables()[0]
-        result = self._conn.execute(f"SELECT * FROM {table_name} LIMIT 0")
+
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(self._engine)
+        cols_info = inspector.get_columns(table_name)
         columns = [
-            ColumnSchema(name=col.name, type=str(col.type))
-            for col in result.cursor.description
+            ColumnSchema(
+                name=c["name"],
+                type=str(c["type"]),
+                description=c.get("comment", None),
+            )
+            for c in cols_info
         ]
-        return TableSchema(name=table_name, columns=columns)
+        return TableSchema(name=table_name, columns=columns, layer=infer_layer(table_name))
 
     def list_tables(self) -> list[str]:
         if self._conn is None:
@@ -44,7 +51,24 @@ class JDBCExecutor(BaseExecutor):
         from sqlalchemy import inspect
 
         inspector = inspect(self._engine)
-        return inspector.get_table_names()
+        return [t for t in inspector.get_table_names() if not t.startswith("_task_context_")]
+
+    def materialize_context(self, context) -> str:
+        table = context.table_name
+        if self._conn is None:
+            self._connect()
+        assert self._conn is not None
+        if context.data is None or context.data.empty:
+            return table
+        context.data.to_sql(table, self._engine, if_exists="replace", index=False)
+        return table
+
+    def drop_context(self, table_name: str) -> None:
+        if self._conn is None:
+            self._connect()
+        assert self._conn is not None
+        from sqlalchemy import text
+        self._conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
 
     def close(self) -> None:
         if self._conn:

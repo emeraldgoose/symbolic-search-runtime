@@ -32,5 +32,11 @@ class CachedExecutor(BaseExecutor):
     def list_tables(self) -> list[str]:
         return self._inner.list_tables()
 
+    def materialize_context(self, context) -> str:
+        return self._inner.materialize_context(context)
+
+    def drop_context(self, table_name: str) -> None:
+        self._inner.drop_context(table_name)
+
     def close(self) -> None:
         self._inner.close()
