@@ -5,8 +5,10 @@ import threading
 
 import pandas as pd
 
-from syrch.core.models import ColumnSchema, TableSchema
+from syrch.core.models import ColumnSchema, ParentContext, TableSchema, infer_layer
 from syrch.executors.base import BaseExecutor
+
+_CONTEXT_PREFIX = "_task_context_"
 
 
 class SQLiteExecutor(BaseExecutor):
@@ -35,17 +37,36 @@ class SQLiteExecutor(BaseExecutor):
             table_name = self.list_tables()[0]
         cursor = conn.execute(f"PRAGMA table_info({table_name})")
         columns = [
-            ColumnSchema(name=row[1], type=row[2], nullable=not row[3])
+            ColumnSchema(name=row[1], type=row[2], nullable=not row[3], description=None)
             for row in cursor.fetchall()
         ]
-        return TableSchema(name=table_name, columns=columns)
+        return TableSchema(name=table_name, columns=columns, layer=infer_layer(table_name))
 
     def list_tables(self) -> list[str]:
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
-        return [row[0] for row in cursor.fetchall()]
+        return [
+            row[0] for row in cursor.fetchall()
+            if not row[0].startswith(_CONTEXT_PREFIX)
+        ]
+
+    def materialize_context(self, context: ParentContext) -> str:
+        table = context.table_name
+        conn = self._get_conn()
+        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        if context.data is None or context.data.empty:
+            conn.commit()
+            return table
+        context.data.to_sql(table, conn, index=False)
+        conn.commit()
+        return table
+
+    def drop_context(self, table_name: str) -> None:
+        conn = self._get_conn()
+        conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+        conn.commit()
 
     def close(self) -> None:
         with self._lock:

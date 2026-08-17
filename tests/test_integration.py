@@ -9,6 +9,7 @@ from syrch.core.config import ExecutionConfig, LLMConfig
 from syrch.core.models import (
     ColumnSchema,
     FinalSolution,
+    NodeStatus,
     ProblemSpec,
     TableSchema,
     TaskDAG,
@@ -137,10 +138,15 @@ class TC1_Executor:
                 ColumnSchema(name="id", type="INT"),
                 ColumnSchema(name="value", type="REAL"),
                 ColumnSchema(name="seg_id", type="INT"),
+                ColumnSchema(name="b_val", type="INT"),
                 ColumnSchema(name="prod_id", type="INT"),
+                ColumnSchema(name="c_val", type="INT"),
                 ColumnSchema(name="ref", type="INT"),
+                ColumnSchema(name="d_val", type="INT"),
                 ColumnSchema(name="geo", type="INT"),
+                ColumnSchema(name="e_val", type="INT"),
                 ColumnSchema(name="cat", type="INT"),
+                ColumnSchema(name="f_val", type="INT"),
             ],
         )
 
@@ -158,7 +164,6 @@ def test_tc1_6node_branching_dag_with_joins():
         db_path=":memory:",
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
         calibration_enabled=False,
     )
@@ -273,7 +278,6 @@ def test_tc2_recursive_decomposition():
         db_path=":memory:",
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
         calibration_enabled=False,
     )
@@ -357,7 +361,7 @@ def test_tc3_grid_search(tmp_path):
 
     grid_config = GridSearchConfig(
         max_depth_values=[2, 3],
-        high_conf_values=[0.85],
+        beam_width_values=[3],
         max_attempts_values=[1, 2],
         calibration_values=[False],
         parallel=False,
@@ -459,7 +463,6 @@ def test_tc4_clarification_loop():
         db_path=":memory:",
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
         calibration_enabled=False,
         interactive=True,
@@ -530,7 +533,6 @@ def test_tc5_token_budget_halts_pipeline():
         db_path=":memory:",
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.9,
         token_budget=30,
         verbose=False,
         calibration_enabled=False,
@@ -579,10 +581,9 @@ class TC6_FaultyExecutor:
 
     def execute(self, sql: str):
         self.call_count += 1
-        # Each node calls execute() twice (validation + final).
-        # A (layer 0): calls 1, 2 → succeed
-        # B (layer 1): call 3 → fail
-        if self.call_count >= 3:
+        # A (layer 0): call 1 → succeed
+        # B (layer 1): call 2 → fail
+        if self.call_count >= 2:
             raise RuntimeError("Simulated DB failure")
         return pd.DataFrame({"x": [1]})
 
@@ -620,7 +621,7 @@ def test_tc6_error_isolation():
     """One node fails with empty result → other nodes succeed, pipeline produces solution."""
     config = ExecutionConfig(
         question="test", db_path=":memory:",
-        max_depth=2, max_attempts_per_node=1, high_confidence=0.9,
+        max_depth=2, max_attempts_per_node=1,
         verbose=False, calibration_enabled=False,
     )
     executor = TC6_FaultyExecutor()
@@ -634,9 +635,10 @@ def test_tc6_error_isolation():
     assert results["A"].error is None
     assert results["A"].data is not None and not results["A"].data.empty
 
-    # B (layer 1) runs second → execute() call 3 raises, caught by RLM → empty data
-    # The empty data is the error signal, not a crash error
-    assert results["B"].error is None  # RLM catches internally
+    # B (layer 1) runs second → execute() call 3 raises, caught by RLM.
+    # RLM now reports an explicit FAILED status instead of a silent empty result.
+    assert results["B"].status == NodeStatus.FAILED
+    assert results["B"].error is not None  # RLM catches internally
     assert results["B"].data is not None
     assert results["B"].data.empty  # empty = failed execution
 
@@ -685,12 +687,12 @@ def test_tc7_calibration_reduces_confidence():
     """Same LLM response → calibration_enabled=True gives lower or equal confidence."""
     config_on = ExecutionConfig(
         question="test", db_path=":memory:",
-        max_depth=2, max_attempts_per_node=3, high_confidence=0.95,
+        max_depth=2, max_attempts_per_node=3,
         verbose=False, calibration_enabled=True,
     )
     config_off = ExecutionConfig(
         question="test", db_path=":memory:",
-        max_depth=2, max_attempts_per_node=3, high_confidence=0.95,
+        max_depth=2, max_attempts_per_node=3,
         verbose=False, calibration_enabled=False,
     )
     executor = TC7_CalExecutor()
@@ -782,7 +784,6 @@ def test_tc8_multi_table_schema():
         db_path=":memory:",
         max_depth=2,
         max_attempts_per_node=1,
-        high_confidence=0.85,
         verbose=False,
         calibration_enabled=False,
     )

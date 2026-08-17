@@ -26,6 +26,7 @@ from syrch.llm.cache import CachedLLM, CentralCache
 from syrch.llm.openai_llm import OpenAILLM
 from syrch.llm.anthropic_llm import AnthropicLLM
 from syrch.search.pipeline import run_pipeline
+from syrch.search.semantic_index import SemanticIndex
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,10 @@ def _build_config(
     executor: str,
     max_depth: int,
     max_attempts: int,
-    high_confidence: float,
+    search_policy: str,
+    beam_width: int,
+    candidate_budget: int,
+    stop_margin: float,
     budget: int,
     llm_provider: str,
     llm_model: str,
@@ -75,7 +79,10 @@ def _build_config(
             executor_type=executor,
             max_depth=max_depth,
             max_attempts_per_node=max_attempts,
-            high_confidence=high_confidence,
+            search_policy=search_policy,
+            beam_width=beam_width,
+            candidate_budget=candidate_budget,
+            stop_margin=stop_margin,
             token_budget=budget,
             verbose=verbose,
             cache_enabled=cache_enabled,
@@ -94,7 +101,10 @@ def search(
     max_depth: int = typer.Option(3, "--max-depth", help="Max D&C recursion depth"),
     executor_type: str = typer.Option("sqlite", "--executor", help="sqlite | databricks-sql | spark | jdbc"),
     max_attempts: int = typer.Option(3, "--max-attempts", help="Max RLM attempts per node"),
-    high_confidence: float = typer.Option(0.85, "--high-conf", help="Confidence threshold for greedy stop"),
+    search_policy: str = typer.Option("beam", "--search-policy", help="Candidate search policy: beam | exhaustive"),
+    beam_width: int = typer.Option(3, "--beam-width", help="Min candidates explored before early stop"),
+    candidate_budget: int = typer.Option(8, "--candidate-budget", help="Max candidates explored per node"),
+    stop_margin: float = typer.Option(0.15, "--stop-margin", help="Posterior gap required to stop early"),
     budget: int = typer.Option(100_000, "--budget", help="Token budget"),
     llm_provider: str = typer.Option("openai", "--llm", help="openai | anthropic"),
     llm_model: str = typer.Option("qwen3.5-4b-4bit", "--model", help="LLM model name"),
@@ -135,7 +145,8 @@ def search(
     setup_logging(LogConfig(level=log_level))
 
     config = _build_config(question, db, executor_type, max_depth, max_attempts,
-                           high_confidence, budget, llm_provider, llm_model,
+                           search_policy, beam_width, candidate_budget, stop_margin,
+                           budget, llm_provider, llm_model,
                            api_key, base_url, verbose,
                            cache_enabled=cache, cache_ttl=cache_ttl,
                            interactive=interactive,
@@ -143,6 +154,7 @@ def search(
 
     console.print(f"[bold]syrch[/bold] \u2014 searching: [cyan]{question}[/cyan]")
     console.print(f"  db={db}  executor={executor_type}  max_depth={max_depth}")
+    console.print(f"  policy={search_policy} beam_width={beam_width} candidate_budget={candidate_budget} stop_margin={stop_margin}")
 
     cache_obj = _create_cache(config)
     llm = _create_llm(config.llm)
@@ -186,7 +198,10 @@ def eval(
     max_depth: int = typer.Option(3, "--max-depth", help="Max D&C recursion depth"),
     executor_type: str = typer.Option("sqlite", "--executor", help="sqlite | databricks-sql | spark | jdbc"),
     max_attempts: int = typer.Option(3, "--max-attempts", help="Max RLM attempts per node"),
-    high_confidence: float = typer.Option(0.85, "--high-conf", help="Confidence threshold"),
+    search_policy: str = typer.Option("beam", "--search-policy", help="Candidate search policy: beam | exhaustive"),
+    beam_width: int = typer.Option(3, "--beam-width", help="Min candidates explored before early stop"),
+    candidate_budget: int = typer.Option(8, "--candidate-budget", help="Max candidates explored per node"),
+    stop_margin: float = typer.Option(0.15, "--stop-margin", help="Posterior gap required to stop early"),
     budget: int = typer.Option(100_000, "--budget", help="Token budget"),
     llm_provider: str = typer.Option("openai", "--llm", help="openai | anthropic"),
     llm_model: str = typer.Option("qwen3.5-4b-4bit", "--model", help="LLM model name"),
@@ -202,7 +217,8 @@ def eval(
     setup_logging(LogConfig(level="WARNING"))
 
     config = _build_config(question, db, executor_type, max_depth, max_attempts,
-                           high_confidence, budget, llm_provider, llm_model,
+                           search_policy, beam_width, candidate_budget, stop_margin,
+                           budget, llm_provider, llm_model,
                            api_key, base_url, verbose=False,
                            cache_enabled=cache, cache_ttl=cache_ttl,
                            config_file=config_file)
@@ -211,7 +227,9 @@ def eval(
     result = run_single(problem, llm_config=config.llm, config_overrides=dict(
         db_path=db, executor_type=executor_type, max_depth=max_depth,
         max_attempts_per_node=max_attempts,
-        high_confidence=high_confidence, token_budget=budget,
+        search_policy=search_policy, beam_width=beam_width,
+        candidate_budget=candidate_budget, stop_margin=stop_margin,
+        token_budget=budget,
         cache_enabled=cache, cache_ttl=cache_ttl,
     ))
 
@@ -227,7 +245,10 @@ def benchmark(
     report_format: str = typer.Option("md", "--report-format", help="md | json"),
     max_depth: int = typer.Option(3, "--max-depth"),
     max_attempts: int = typer.Option(3, "--max-attempts"),
-    high_confidence: float = typer.Option(0.85, "--high-conf"),
+    search_policy: str = typer.Option("beam", "--search-policy", help="Candidate search policy: beam | exhaustive"),
+    beam_width: int = typer.Option(3, "--beam-width", help="Min candidates explored before early stop"),
+    candidate_budget: int = typer.Option(8, "--candidate-budget", help="Max candidates explored per node"),
+    stop_margin: float = typer.Option(0.15, "--stop-margin", help="Posterior gap required to stop early"),
     executor_type: str = typer.Option("sqlite", "--executor", help="sqlite | databricks-sql | spark | jdbc"),
     llm_provider: str = typer.Option("openai", "--llm"),
     llm_model: str = typer.Option("qwen3.5-4b-4bit", "--model"),
@@ -246,7 +267,10 @@ def benchmark(
     console.print(f"Loaded [cyan]{len(problems)}[/cyan] problems")
 
     llm_config = LLMConfig(provider=llm_provider, model=llm_model, api_key=api_key, base_url=base_url)
-    overrides = dict(max_depth=max_depth, max_attempts_per_node=max_attempts, high_confidence=high_confidence, executor_type=executor_type, cache_enabled=cache, cache_ttl=cache_ttl)
+    overrides = dict(max_depth=max_depth, max_attempts_per_node=max_attempts,
+                     search_policy=search_policy, beam_width=beam_width,
+                     candidate_budget=candidate_budget, stop_margin=stop_margin,
+                     executor_type=executor_type, cache_enabled=cache, cache_ttl=cache_ttl)
 
     results = run_benchmark(problems, llm_config=llm_config, config_overrides=overrides)
     print_benchmark_report(console, results)
@@ -287,11 +311,39 @@ def config(db: str = typer.Option("orders_10dim.sqlite", "--db", help="Database 
     t = Table("Option", "Default")
     t.add_row("max_depth", str(cfg.max_depth))
     t.add_row("max_attempts_per_node", str(cfg.max_attempts_per_node))
-    t.add_row("high_confidence", str(cfg.high_confidence))
+    t.add_row("search_policy", cfg.search_policy)
+    t.add_row("beam_width", str(cfg.beam_width))
+    t.add_row("candidate_budget", str(cfg.candidate_budget))
+    t.add_row("stop_margin", str(cfg.stop_margin))
     t.add_row("token_budget", str(cfg.token_budget))
     t.add_row("executor_type", cfg.executor_type)
     t.add_row("calibration_enabled", str(cfg.calibration_enabled))
     console.print(t)
+
+
+@app.command()
+def build_index(
+    db: str = typer.Option("orders_10dim.sqlite", "--db", help="Database path"),
+    llm_provider: str = typer.Option("openai", "--llm"),
+    llm_model: str = typer.Option("qwen3.5-4b-4bit", "--model"),
+    api_key: Optional[str] = typer.Option(None, "--api-key", envvar="OPENAI_API_KEY"),
+    base_url: Optional[str] = typer.Option("http://localhost:8000/v1", "--base-url"),
+) -> None:
+    """Build Business Semantic Index from database schema."""
+    from syrch.executors.sqlite_executor import SQLiteExecutor
+    executor = SQLiteExecutor(db)
+    schemas = [executor.get_schema(t) for t in executor.list_tables()]
+    executor.close()
+
+    llm = _create_llm(LLMConfig(provider=llm_provider, model=llm_model, api_key=api_key, base_url=base_url))
+    console.print(f"[bold]Building semantic index[/bold] for {len(schemas)} tables...")
+    console.print(f"  LLM: {llm_model}")
+    console.print(f"  This may take a while ({len(schemas)} tables x ~10 columns each)")
+
+    index = SemanticIndex.build(schemas, llm)
+    index.save()
+    total_terms = sum(len(v) for v in index._data.values())
+    console.print(f"[green]Done.[/green] {len(index._data)} terms, {total_terms} column mappings saved to ~/.syrch/semantic_index.json")
 
 
 def _show_plan(dag) -> None:

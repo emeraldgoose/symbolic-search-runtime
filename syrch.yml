@@ -10,7 +10,10 @@ execution:
   executor_type: sqlite
   max_depth: 3
   max_attempts_per_node: 3
-  high_confidence: 0.85
+  search_policy: beam
+  beam_width: 3
+  candidate_budget: 8
+  stop_margin: 0.15
   token_budget: 100000
   cache_enabled: true
   cache_ttl: 86400

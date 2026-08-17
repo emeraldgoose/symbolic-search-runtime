@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 
-from syrch.core.models import ColumnSchema, TableSchema
+from syrch.core.models import ColumnSchema, TableSchema, infer_layer
 from syrch.executors.base import BaseExecutor
 
 logger = logging.getLogger(__name__)
@@ -113,11 +113,14 @@ class DatabricksExecutor(BaseExecutor):
         logger.debug("Fetching schema for table: %s", table_name)
         with self._conn.cursor() as cursor:
             cursor.columns(catalog_name=catalog, schema_name=schema, table_name=table)
-            columns = [
-                ColumnSchema(name=row[2], type=row[5])
-                for row in cursor.fetchall()
-            ]
-        return TableSchema(name=table_name, columns=columns)
+            rows = cursor.fetchall()
+            columns = []
+            for row in rows:
+                desc: str | None = None
+                if len(row) > 11 and row[11] is not None and str(row[11]).strip():
+                    desc = str(row[11]).strip()
+                columns.append(ColumnSchema(name=row[3], type=row[5], description=desc))
+        return TableSchema(name=table_name, columns=columns, layer=infer_layer(table_name))
 
     def list_tables(self) -> list[str]:
         if self._tables:
@@ -128,7 +131,44 @@ class DatabricksExecutor(BaseExecutor):
         logger.debug("Listing tables in catalog=%s schema=%s", self.catalog, self.schema_name)
         with self._conn.cursor() as cursor:
             cursor.tables(catalog_name=self.catalog, schema_name=self.schema_name)
-            return sorted({row[2] for row in cursor.fetchall()})
+            return sorted({row[2] for row in cursor.fetchall() if not row[2].startswith("_task_context_")})
+
+    def materialize_context(self, context) -> str:
+        table = context.table_name
+        if self._conn is None:
+            self._connect()
+        assert self._conn is not None
+        if context.data is None or context.data.empty:
+            return table
+        values = []
+        for row in context.data.itertuples(index=False, name=None):
+            rendered = ", ".join(self._literal(v) for v in row)
+            values.append(f"({rendered})")
+        cols = ", ".join(f"`{c}`" for c in context.data.columns)
+        sql = (
+            f"CREATE OR REPLACE TEMP VIEW `{table}` AS "
+            f"SELECT * FROM VALUES {', '.join(values)} AS t({cols})"
+        )
+        with self._conn.cursor() as cursor:
+            cursor.execute(sql)
+        return table
+
+    @staticmethod
+    def _literal(v: object) -> str:
+        if v is None:
+            return "NULL"
+        if isinstance(v, bool):
+            return "TRUE" if v else "FALSE"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return "'" + str(v).replace("'", "''") + "'"
+
+    def drop_context(self, table_name: str) -> None:
+        if self._conn is None:
+            self._connect()
+        assert self._conn is not None
+        with self._conn.cursor() as cursor:
+            cursor.execute(f"DROP VIEW IF EXISTS `{table_name}`")
 
     def close(self) -> None:
         if self._conn:

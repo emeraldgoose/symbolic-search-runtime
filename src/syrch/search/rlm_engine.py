@@ -1,86 +1,234 @@
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
+import re
+
+from typing import Any
+
 from syrch.core.config import ExecutionConfig
-from syrch.core.models import NodeResult, ReasoningPath, TaskNode
+from syrch.core.models import (
+    AttemptSchemaContext,
+    CandidateEvaluation,
+    NodeResult,
+    NodeStatus,
+    ParentContext,
+    ReasoningPath,
+    ReplanType,
+    ScoredTable,
+    TableSchema,
+    TaskNode,
+)
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
-from syrch.search.calibrator import ExecutionSignals, calibrate
+from syrch.search.calibrator import ExecutionSignals
 from syrch.search.clarify import compute_ambiguity_score
+from syrch.search.path_evaluator import PathEvaluator
+from syrch.search.retriever import Retriever
+from syrch.search.search_policy import build_policy
+from syrch.search.validator import Validator
 
-RLM_SYSTEM = """You are a search agent working inside a SQL query environment.
-You have access to:
-- A database with the following tables:
-{schema}
-- The executor to run SQL queries
-- Previous sub-task results as variables (e.g., result_A, result_B, etc.)
+logger = logging.getLogger(__name__)
 
-Your task:
-{task_description}
+RLM_SYSTEM = """You are a constraint-based SQL generator.
+
+CRITICAL RULES — Follow ALL:
+
+1. USE ONLY COLUMNS SHOWN IN THE SCHEMA BELOW. Never invent column names.
+    Map business terms to physical column names. Never use a business term as a column name directly.
+
+2. Aggregate/metric questions MUST include GROUP BY. If the question asks for
+   total, average, sum, count, per, by, or a metric column, use aggregation
+   functions + GROUP BY. Never return raw rows for an aggregate question.
+
+3. Time-filtered questions MUST include WHERE on a date/time column. If the
+   question mentions a year, month, quarter, date range, trend, or "recent",
+   add a date filter condition.
+
+4. SCD2 tables (having valid_from, valid_to columns): always filter by
+   valid_from <= reference_date AND (valid_to > reference_date OR valid_to IS NULL).
+
+5. Prefer hint_columns and metric_columns over other columns. These are the
+   columns most likely to answer the question correctly.
+
+6. Column aliases must be business-domain terms, not question phrases.
+
+7. Never embed dates, years, or time ranges in column aliases.
+
+8. Do not invent column names. Every column name you SELECT must exist
+   in the schema. If you need a derived value, give it a short domain alias.
+
+9. TASK CONTEXT tables (`_task_context_*`) are real materialized tables
+   produced by earlier tasks in this run. You MAY use them in FROM or JOIN,
+   exactly like physical tables. They are listed under "Task context tables"
+   with their columns. Use them as intermediate results when joining
+   dependent steps.
+
+10. FROM must anchor on a PRIMARY table or a TASK CONTEXT table. Never anchor
+    FROM on a JOIN-AVAILABLE table — that switches the primary source and the
+    attempt is testing a different candidate. JOIN-AVAILABLE tables may be
+    used ONLY in JOIN clauses.
+
+11. If the question describes a business state or reason that has no dedicated
+    column, look for an existing categorical column whose values encode that
+    state and filter on those values. Never invent a column name for a state
+    that is not explicitly present in the schema — approximate it with the
+    values that already exist.
 
 {hint_section}
-For each attempt, produce a SQL query that:
-1. Constructs a SQL query addressing the task
-2. Stores the result in a variable
+Available tables:
+{schema}
 
-After each attempt, output a confidence score between 0.0 and 1.0.
+Task: {task_description}
 
-When you are satisfied, output FINAL(result_var_name) to submit your answer.
-
-IMPORTANT: You MUST end your response with "Confidence: <0.0-1.0>" on its own line.
-Do NOT forget the confidence line. A confidence of 1.0 means absolutely certain.
-"""
+Output your SQL query, then end with "Confidence: <0.0-1.0>" on its own line.
+When satisfied, output FINAL(result_var_name)."""
 
 
 class RLMAgent:
     MAX_ROWS_WARNING = 1000
 
-    def __init__(self, llm: BaseLLM, executor: BaseExecutor, config: ExecutionConfig):
+    def __init__(
+        self,
+        llm: BaseLLM,
+        executor: BaseExecutor,
+        config: ExecutionConfig,
+        retriever: Retriever | None = None,
+        all_schemas: list | None = None,
+        alias_map: dict[str, list[tuple[str, str, str | None]]] | None = None,
+        candidate_pool: list[ScoredTable] | None = None,
+    ):
         self.llm = llm
         self.executor = executor
         self.config = config
+        self.retriever = retriever
+        self.all_schemas = all_schemas
+        self.alias_map = alias_map or {}
         self._compressed_schemas: list | None = None
+        self._candidate_pool: list[ScoredTable] = candidate_pool or []
+        self._allowed_tables: set[str] | None = None
+        self._attempt_scope: AttemptSchemaContext | None = None
 
     def set_compressed_schemas(self, schemas: list | None) -> None:
         self._compressed_schemas = schemas
 
+    def set_candidate_pool(self, pool: list[ScoredTable]) -> None:
+        self._candidate_pool = pool
+
     def _build_schema_str(self) -> str:
+        if self._attempt_scope is not None:
+            return self._render_scope(self._attempt_scope)
         if self._compressed_schemas is not None:
-            parts: list[str] = []
-            for s in self._compressed_schemas:
-                cols = ", ".join(f"{c.name} ({c.type})" for c in s.columns)
-                parts.append(f"Table: {s.name}\nColumns: {cols}")
-            return "\n\n".join(parts) if parts else "No tables available."
+            return self._format_schemas(list(self._compressed_schemas))
         tables = self.executor.list_tables()
         parts = []
         for t in tables:
             schema = self.executor.get_schema(t)
-            cols = ", ".join(f"{c.name} ({c.type})" for c in schema.columns)
-            parts.append(f"Table: {schema.name}\nColumns: {cols}")
+            parts.append(self._format_table(schema))
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _format_table(s: TableSchema) -> str:
+        col_parts = []
+        for c in s.columns:
+            desc = f" ({c.description})" if c.description else ""
+            col_parts.append(f"{c.name} ({c.type}){desc}")
+        return f"Table: {s.name}\nColumns: {', '.join(col_parts)}"
+
+    @staticmethod
+    def _format_schemas(schemas: list[TableSchema]) -> str:
+        return "\n\n".join(RLMAgent._format_table(s) for s in schemas)
+
+    def _resolve_schemas(self, names: set[str]) -> list[TableSchema]:
+        by_name: dict[str, TableSchema] = {}
+        if self.all_schemas:
+            by_name = {s.name: s for s in self.all_schemas}
+        else:
+            for t in self.executor.list_tables():
+                by_name[t] = self.executor.get_schema(t)
+        return [by_name[n] for n in sorted(names) if n in by_name]
+
+    def _render_scope(self, scope: AttemptSchemaContext) -> str:
+        parts: list[str] = []
+        primary = self._resolve_schemas(scope.primary_tables)
+        if primary:
+            parts.append(
+                "PRIMARY TABLES\n"
+                "FROM must reference exactly these tables (the candidate under test). "
+                "Never anchor FROM on a JOIN-AVAILABLE table."
+            )
+            parts.append(self._format_schemas(primary))
+        join = self._resolve_schemas(scope.join_available_tables)
+        if join:
+            parts.append(
+                "JOIN-AVAILABLE TABLES\n"
+                "These tables are available only in JOIN clauses. They may never "
+                "appear in FROM (that would switch the primary source)."
+            )
+            parts.append(self._format_schemas(join))
+        contexts = [c for c in scope.task_contexts if c.materialized]
+        if contexts:
+            ctx_parts: list[str] = []
+            for c in contexts:
+                cols = ", ".join(f"{col.name} ({col.type})" for col in c.columns)
+                ctx_parts.append(f"{c.table_name}: {cols}")
+            parts.append(
+                "TASK CONTEXT TABLES (materialized)\n"
+                "These are real tables produced by earlier tasks. You MAY use them "
+                "in FROM or JOIN."
+            )
+            parts.append("\n".join(ctx_parts))
+        return "\n\n".join(parts) if parts else "No tables available."
+
     def _build_valid_columns(self) -> set[str]:
-        if self._compressed_schemas is not None:
-            cols: set[str] = set()
-            for s in self._compressed_schemas:
+        cols: set[str] = set()
+        if self.all_schemas:
+            for s in self.all_schemas:
                 cols.update(c.name.lower() for c in s.columns)
-            cols.add("*")
-            return cols
-        cols = set()
-        for t in self.executor.list_tables():
-            schema = self.executor.get_schema(t)
-            cols.update(c.name.lower() for c in schema.columns)
+        else:
+            for t in self.executor.list_tables():
+                schema = self.executor.get_schema(t)
+                cols.update(c.name.lower() for c in schema.columns)
+        scope = self._attempt_scope
+        if scope is not None:
+            for c in scope.task_contexts:
+                cols.update(col.name.lower() for col in c.columns)
         cols.add("*")
         return cols
 
-    @staticmethod
-    def _build_hint_section(node: TaskNode) -> str:
+    def _build_hint_section(self, node: TaskNode) -> str:
+        shown = set()
+        for s in self._compressed_schemas or []:
+            shown.add(s.name)
         parts: list[str] = []
         if node.hint_tables:
-            parts.append("Recommended tables (strongly prefer these): " + ", ".join(node.hint_tables))
+            hinted = [t for t in node.hint_tables if t in shown] or []
+            if hinted:
+                score_info = ""
+                if node.selection_reason and node.selection_reason.score > 0:
+                    score_info = f" (confidence: {node.selection_reason.score:.2f})"
+                parts.append(f"Recommended tables: {', '.join(hinted)}{score_info}")
         if node.hint_columns:
-            parts.append("Planner hint — columns you may need (verify actual names): " + ", ".join(node.hint_columns))
+            parts.append("Prefer these columns: " + ", ".join(node.hint_columns))
+        if node.metric_columns:
+            parts.append("Metric columns (use these for aggregation): " + ", ".join(node.metric_columns))
+        if node.grain:
+            parts.append("Row granularity: " + node.grain)
+        if node.time_columns:
+            parts.append("Time columns for date filtering: " + ", ".join(node.time_columns))
+        if node.requirements and node.requirements.render():
+            parts.append("REQUIREMENTS (what this task must compute):" + node.requirements.render())
+        if self.alias_map:
+            alias_lines: list[str] = []
+            for term, mappings in sorted(self.alias_map.items()):
+                cols_str = "; ".join(
+                    f"{agg}({col}) in {tbl}" if agg else f"{col} in {tbl}"
+                    for col, tbl, agg in mappings
+                )
+                alias_lines.append(f"  {term} → {cols_str}")
+            parts.append("ALIAS MAP — Business terms → physical columns:\n" + "\n".join(alias_lines))
         if parts:
             return "\n".join(parts) + "\n"
         return ""
@@ -88,186 +236,466 @@ class RLMAgent:
     def solve(
         self,
         node: TaskNode,
-        context: dict[str, NodeResult] | None = None,
+        context: dict[str, ParentContext] | None = None,
     ) -> NodeResult:
-        paths: list[ReasoningPath] = []
-        best_path: ReasoningPath | None = None
+        order = self._build_candidate_order(node)
+        policy = build_policy(
+            self.config.search_policy,
+            order,
+            beam_width=self.config.beam_width,
+            max_candidates=self.config.candidate_budget,
+            stop_margin=self.config.stop_margin,
+        )
+        evaluator = PathEvaluator()
+
+        evaluations: dict[str, CandidateEvaluation] = {}
+        result_by_table: dict[str, NodeResult] = {}
+        all_paths: list[ReasoningPath] = []
         total_cost = 0
-        signals = ExecutionSignals(max_attempts=self.config.max_attempts_per_node)
+        expansions = 0
 
-        schema_str = self._build_schema_str()
+        while True:
+            if not policy.has_next():
+                viable = [e for e in evaluations.values() if e.viable]
+                if (
+                    self._is_ambiguous(viable)
+                    and expansions < self.config.max_candidate_expansion
+                    and policy.remaining()
+                ):
+                    policy.expand(1)
+                    expansions += 1
+                    if self.config.verbose:
+                        logger.info(
+                            "  [%s] ambiguous; expanding search (%d/%d)",
+                            node.id, expansions, self.config.max_candidate_expansion,
+                        )
+                    continue
+                break
+
+            cand = policy.next()
+            scope = self._build_attempt_schemas(node, cand, context)
+            self._attempt_scope = scope
+            self._allowed_tables = scope.allowed_tables
+            self._compressed_schemas = self._resolve_schemas(scope.allowed_tables)
+            if self.config.verbose:
+                logger.info(
+                    "  [%s] attempt scope: candidate=%s PRIMARY={%s} JOIN_AVAILABLE={%s} "
+                    "TASK_CONTEXT={%s} ALLOWED_FROM={%s}",
+                    node.id, cand.schema.name,
+                    ", ".join(sorted(scope.primary_tables)) or "-",
+                    ", ".join(sorted(scope.join_available_tables)) or "-",
+                    ", ".join(t.table_name for t in scope.task_contexts) or "-",
+                    ", ".join(sorted(scope.allowed_tables)) or "-",
+                )
+            result, ok = self._attempt(node, cand.score, context)
+            total_cost += result.cost_tokens
+            all_paths.extend(result.reasoning_paths)
+
+            ev = self._build_candidate_evaluation(node, cand, result, ok, evaluator)
+            evaluations[cand.schema.name] = ev
+            policy.update(ev)
+            if ok:
+                result_by_table[cand.schema.name] = result
+
+        viable = [e for e in evaluations.values() if e.viable]
+
+        if not viable:
+            result = NodeResult(
+                node_id=node.id,
+                data=pd.DataFrame(),
+                sql="",
+                confidence=0.0,
+                status=NodeStatus.FAILED,
+                candidates=list(evaluations.values()),
+                reasoning_paths=all_paths,
+                cost_tokens=total_cost,
+                error="No valid SQL generated",
+            )
+            result.ambiguity_score = 1.0
+            if len(order) > 1:
+                tried = ", ".join(c.schema.name for c in order)
+                result.replan_request = (
+                    ReplanType.STRUCTURAL,
+                    f"Local search exhausted {len(order)} candidates [{tried}]",
+                )
+            return result
+
+        ranked = sorted(viable, key=self._rank_key, reverse=True)
+        top = ranked[0]
+        best_result = result_by_table[top.table]
+
+        if len(ranked) >= 2 and top.ranking_signals == ranked[1].ranking_signals:
+            best_result.status = NodeStatus.AMBIGUOUS
+            best_result.selected_candidate = None
+            best_result.ambiguity_score = 1.0
+            best_result.replan_request = (
+                ReplanType.STRUCTURAL,
+                f"Ambiguous: {top.table} == {ranked[1].table}",
+            )
+        else:
+            best_result.status = NodeStatus.SOLVED
+            best_result.selected_candidate = top
+
+        best_result.candidates = list(evaluations.values())
+        best_result.cost_tokens = total_cost
+        best_result.reasoning_paths = all_paths
+        return best_result
+
+    @staticmethod
+    def _rank_key(e: CandidateEvaluation):
+        """Deterministic lexicographic selection key (candidate_id last).
+
+        Discrimination only — lexical relevance (`semantic_match`) and token
+        cost never select a candidate over a genuinely indistinguishable one.
+        """
+        return (
+            e.structural_match,
+            e.grain_match,
+            e.dimension_match,
+            e.time_match,
+            e.result_quality,
+            e.candidate_id,
+        )
+
+    @staticmethod
+    def _is_ambiguous(viable: list[CandidateEvaluation]) -> bool:
+        """True when the top two viable candidates are indistinguishable on the
+        ranking signals (execution order never breaks the tie)."""
+        if len(viable) < 2:
+            return False
+        ranked = sorted(viable, key=RLMAgent._rank_key, reverse=True)
+        return ranked[0].ranking_signals == ranked[1].ranking_signals
+
+    def _build_candidate_evaluation(
+        self,
+        node: TaskNode,
+        cand: ScoredTable,
+        result: NodeResult,
+        ok: bool,
+        evaluator: PathEvaluator,
+    ) -> CandidateEvaluation:
+        ps = result.path_score
+        return CandidateEvaluation(
+            table=cand.schema.name,
+            ok=ok,
+            execution_valid=ok and result.error is None,
+            requirement_pass=bool(
+                result.validation is not None and result.validation.passed
+            ),
+            semantic_match=evaluator.semantic_match(node, cand.schema, result.data),
+            result_quality=ps.execution_signal if ps else 0.0,
+            structural_match=evaluator.structural_match(
+                result.validation, node, result.data
+            ),
+            grain_match=evaluator.grain_match(node, cand.schema),
+            dimension_match=evaluator.dimension_match(node, cand.schema),
+            time_match=evaluator.time_match(node, cand.schema),
+            cost_tokens=result.cost_tokens,
+            candidate_id=cand.schema.name,
+            confidence=result.confidence,
+            error=result.error,
+            attempts=len(result.reasoning_paths),
+            has_data=result.data is not None and not result.data.empty,
+            path_score=ps,
+        )
+
+    def _build_candidate_order(self, node: TaskNode) -> list[ScoredTable]:
+        pool_by_name: dict[str, ScoredTable] = {
+            c.schema.name: c for c in self._candidate_pool
+        }
+        order: list[ScoredTable] = []
+        seen: set[str] = set()
+
+        hint_names = node.hint_tables or []
+        hint_cands: list[ScoredTable] = []
+        for name in hint_names:
+            cand = pool_by_name.get(name)
+            if cand is not None:
+                hint_cands.append(cand)
+        hint_cands.sort(key=lambda c: -c.score)
+        for cand in hint_cands:
+            if cand.schema.name not in seen:
+                seen.add(cand.schema.name)
+                order.append(cand)
+
+        pool_cands = [
+            c for c in self._candidate_pool
+            if c.score > 0 and c.schema.name not in seen
+        ]
+        pool_cands.sort(key=lambda c: -c.score)
+        order.extend(pool_cands)
+
+        if not order:
+            schemas = (self._compressed_schemas or []) or (self.all_schemas or [])
+            for s in schemas:
+                if s.name not in seen:
+                    seen.add(s.name)
+                    order.append(ScoredTable(schema=s, score=0.0))
+
+        if not order:
+            for t in self.executor.list_tables():
+                schema = self.executor.get_schema(t)
+                if schema.name not in seen:
+                    seen.add(schema.name)
+                    order.append(ScoredTable(schema=schema, score=0.0))
+
+        return order
+
+    def _search_scope(self) -> set[str]:
+        """The retriever candidate pool — the bounded source for join-available
+        tables. This is NOT the FROM boundary: the per-attempt boundary is
+        `AttemptSchemaContext.allowed_tables` (S3), computed in
+        `_build_attempt_schemas`. Drift to a pool-external physical table is
+        still rejected by `_validate_schema` (S5)."""
+        if self._candidate_pool:
+            return {c.schema.name for c in self._candidate_pool}
+        if self.all_schemas:
+            return {s.name for s in self.all_schemas}
+        return set()
+
+    def _build_attempt_schemas(
+        self,
+        node: TaskNode,
+        cand: ScoredTable,
+        context: dict[str, ParentContext] | None = None,
+    ) -> AttemptSchemaContext:
+        """Build the explicit per-attempt SQL scope (S3).
+
+        PRIMARY = the candidate under test. JOIN-AVAILABLE = pool-bounded
+        supporting relations: tables sharing a join key (column name) with the
+        primary, tables the planner hinted for this node, requirement
+        supporting_relations, and the physical source tables of any dependency
+        context. Every join candidate must be in the candidate pool — the pool
+        is the only source, so an out-of-pool table stays unreferenceable (S5
+        drift guard) and the v0.3.3 schema-dump problem does not resurface.
+        TASK CONTEXT entries are carried as materialized table references
+        (v0.3.5b); materialized ones may appear in FROM/JOIN.
+        """
+        pool_names = self._search_scope()
+        primary: set[str] = {cand.schema.name}
+
+        join: set[str] = set()
+        if node.hint_tables:
+            join.update(node.hint_tables)
+        if node._compressed_schemas:
+            join.update(s.name for s in node._compressed_schemas)
+        if node.requirements and node.requirements.supporting_relations:
+            join.update(r.table for r in node.requirements.supporting_relations)
+        if context:
+            for ctx in context.values():
+                join.update(ctx.source_tables)
+
+        primary_cols = {c.name.lower() for c in cand.schema.columns}
+        for t in self._candidate_pool:
+            if t.schema.name == cand.schema.name:
+                continue
+            cols = {c.name.lower() for c in t.schema.columns}
+            if cols & primary_cols:
+                join.add(t.schema.name)
+
+        join &= pool_names
+        join -= primary
+
+        task_contexts = list(context.values()) if context else []
+        return AttemptSchemaContext(
+            primary_tables=primary,
+            join_available_tables=join,
+            task_contexts=task_contexts,
+        )
+
+    def _attempt(
+        self,
+        node: TaskNode,
+        retriever_score: float,
+        context: dict[str, ParentContext] | None = None,
+    ) -> tuple[NodeResult, bool]:
         hint_section = self._build_hint_section(node)
-
         context_vars = ""
         if context:
-            for nid, res in context.items():
-                if res.data is not None and not res.data.empty:
-                    preview = res.data.head(3).to_string()
-                    context_vars += f"\nresult_{nid} =\n{preview}\n"
-
-        system = RLM_SYSTEM.format(
-            schema=schema_str,
-            task_description=node.description,
-            hint_section=hint_section,
-        )
-        user_prompt = (
-            f"Task: {node.description}\n"
-            f"Expected output: {node.expected_output_desc}\n"
-        )
-        if context_vars:
-            user_prompt += f"\nAvailable results from dependencies:\n{context_vars}\n"
-        user_prompt += "\nGenerate a SQL query and confidence score."
+            rendered = [ctx.to_prompt() for ctx in context.values()]
+            if rendered:
+                context_vars = "\n" + "\n".join(rendered) + "\n"
 
         max_tokens = self.config.llm.max_tokens_per_call
+        requirements = node.requirements
+        validator = Validator()
+        evaluator = PathEvaluator()
 
-        for attempt in range(self.config.max_attempts_per_node):
+        best_result: NodeResult | None = None
+        best_pscore = -1.0
+        all_paths: list[ReasoningPath] = []
+        total_cost = 0
+        max_attempts = self.config.max_attempts_per_node
+
+        for attempt in range(max_attempts):
+            signals = ExecutionSignals(max_attempts=max_attempts)
             signals.num_attempts = attempt + 1
+
+            schema_str = self._build_schema_str()
+            system = RLM_SYSTEM.format(
+                schema=schema_str,
+                task_description=node.description,
+                hint_section=hint_section,
+            )
+            user_prompt = (
+                f"Task: {node.description}\n"
+                f"Expected output: {node.expected_output_desc}\n"
+            )
+            if context_vars:
+                user_prompt += (
+                    "\nTASK CONTEXT (materialized results of earlier tasks; "
+                    "use them in FROM/JOIN when they are real tables):\n"
+                    f"{context_vars}\n"
+                )
+            user_prompt += "\nGenerate a SQL query and confidence score."
+
             response = self.llm.generate(system, user_prompt, max_tokens=max_tokens)
             sql = self._extract_sql(response.content)
-            confidence, confidence_found = self._extract_confidence(response.content)
+            confidence, _ = self._extract_confidence(response.content)
             tokens = response.usage.get("completion_tokens", 0) if response.usage else 0
             total_cost += tokens
 
-            if not sql:
-                path = ReasoningPath(
-                    path_id=f"{node.id}-{attempt}",
-                    sql="",
-                    confidence=confidence,
-                    cost_tokens=tokens,
-                )
-                paths.append(path)
-                if attempt < self.config.max_attempts_per_node - 1:
-                    user_prompt = (
-                        f"Attempt {attempt + 1}: No SQL found. "
-                        f"Please generate a valid SQL query."
-                    )
-                continue
-
             path = ReasoningPath(
-                path_id=f"{node.id}-{attempt}",
-                sql=sql,
+                path_id=f"{node.id}-a{attempt}",
+                sql=sql or "",
                 confidence=confidence,
                 cost_tokens=tokens,
             )
 
-            syntax_error = self._validate_sql(sql)
-            if syntax_error:
-                signals.syntax_errors += 1
-                paths.append(path)
-                if best_path is None or confidence > best_path.confidence:
-                    best_path = path
-                user_prompt = (
-                    f"SQL syntax error: {syntax_error}\n\n"
-                    f"Fix the SQL syntax and try again."
+            if not sql:
+                # DIAGNOSTIC: capture why extraction failed so empty-SQL
+                # failures can be grouped by root cause (prose / wrong fence
+                # / refusal) instead of collapsing into one "empty SQL".
+                snippet = response.content.strip().replace("\n", " \\n ")[:600]
+                logger.warning(
+                    "  [%s#a%d] empty SQL (tokens=%d) raw: %s",
+                    node.id, attempt, tokens, snippet,
                 )
-                continue
+                all_paths.append(path)
+                break
 
-            schema_error = self._validate_schema(sql)
-            if schema_error:
+            if self.config.verbose:
+                logger.info("  [%s#a%d] SQL: %s", node.id, attempt, sql[:300])
+
+            syntax_err = self._validate_sql(sql)
+            if syntax_err:
+                logger.warning("  [%s#a%d] SYNTAX FAIL (attempt %d/%d): %s", node.id, attempt, attempt + 1, max_attempts, syntax_err)
+                signals.syntax_errors += 1
+                all_paths.append(path)
+                if attempt < max_attempts - 1:
+                    user_prompt = f"SQL syntax error: {syntax_err}\n\nFix it and try again."
+                    continue
+                break
+
+            schema_err = self._validate_schema(sql)
+            if schema_err:
+                logger.warning("  [%s#a%d] SCHEMA FAIL (attempt %d/%d): %s", node.id, attempt, attempt + 1, max_attempts, schema_err)
                 signals.schema_errors += 1
-                paths.append(path)
-                if best_path is None or confidence > best_path.confidence:
-                    best_path = path
-                user_prompt = (
-                    f"SQL semantic error: {schema_error}\n\n"
-                    f"Fix the query and try again."
-                )
+                all_paths.append(path)
+                if attempt < max_attempts - 1:
+                    user_prompt = f"SQL semantic error: {schema_err}\n\nFix it and try again."
+                    continue
+                break
+
+            alias_err = self._validate_aliases(sql, node)
+            if alias_err:
+                logger.warning("  [%s#a%d] ALIAS FAIL: %s", node.id, attempt, alias_err)
+                signals.quality_warnings.append(alias_err)
+                all_paths.append(path)
                 continue
 
             try:
                 data = self.executor.execute(sql)
             except Exception as e:
                 error_msg = str(e).lower()
-                # Non-recoverable errors → signal replan
-                if self._is_non_recoverable(error_msg, node):
-                    result = NodeResult(
-                        node_id=node.id,
-                        data=pd.DataFrame(),
-                        sql=sql,
-                        confidence=0.0,
-                        reasoning_paths=paths,
-                        cost_tokens=total_cost,
-                        error=f"Non-recoverable: {e}",
-                        replan_request=self._build_replan_reason(error_msg, node),
-                    )
-                    result.ambiguity_score = 1.0
-                    return result
+                is_wrong_table = any(phrase in error_msg for phrase in
+                    ["no such table", "table not found", "doesn't exist",
+                     "table does not exist", "relation", "not found", "ambiguous column"])
+                logger.warning("  [%s#a%d] EXEC FAIL (attempt %d/%d): %s", node.id, attempt, attempt + 1, max_attempts, str(e)[:200])
                 signals.execution_errors += 1
-                paths.append(path)
-                if best_path is None or confidence > best_path.confidence:
-                    best_path = path
-                user_prompt = (
-                    f"SQL execution error: {e}\n\n"
-                    f"Try again with a corrected SQL query."
+                all_paths.append(path)
+                if attempt < max_attempts - 1:
+                    if is_wrong_table:
+                        user_prompt = f"SQL execution error: {e}\n\nUse only the tables shown in the schema above.\n\nTry again."
+                    else:
+                        user_prompt = f"SQL execution error: {e}\n\nTry again."
+                    continue
+                path.path_score = evaluator.evaluate(None, signals, retriever_score)
+                node_result = NodeResult(
+                    node_id=node.id,
+                    data=pd.DataFrame(),
+                    sql=sql or "",
+                    confidence=confidence or 0.0,
+                    reasoning_paths=[path],
+                    cost_tokens=total_cost,
+                    path_score=path.path_score,
                 )
-                continue
-
-            paths.append(path)
-
-            if best_path is None or confidence > best_path.confidence:
-                best_path = path
-
-            if not confidence_found and data is not None and not data.empty:
-                confidence = 0.85
-            best_path = path
-            best_path.confidence = confidence
-
-            quality_feedback = self._check_result_quality(data)
-            if quality_feedback:
-                signals.quality_warnings.append(quality_feedback)
-                if "0 rows" in quality_feedback:
-                    signals.had_empty_result = True
-                if "all NULL" in quality_feedback:
-                    signals.had_null_columns = True
-                if f"{self.MAX_ROWS_WARNING}" in quality_feedback:
-                    signals.had_overflow_result = True
-                user_prompt = f"{quality_feedback}\n\nTry a different SQL approach."
-                continue
-
-            if confidence >= self.config.high_confidence:
+                node_result.ambiguity_score = compute_ambiguity_score(node_result)
+                if path.path_score and path.path_score.total > best_pscore:
+                    best_pscore = path.path_score.total
+                    best_result = node_result
                 break
 
-            if attempt < self.config.max_attempts_per_node - 1:
-                user_prompt = (
-                    f"Attempt {attempt + 1} confidence was {confidence:.2f} "
-                    f"(target: {self.config.high_confidence}). "
-                    f"Try a different SQL approach to improve confidence."
-                )
+            valid_cols = self._build_valid_columns()
+            vresult = validator.validate(sql, requirements, valid_cols)
+            path.path_score = evaluator.evaluate(vresult, signals, retriever_score)
+            all_paths.append(path)
 
-            if len(user_prompt) > 2000:
-                user_prompt = user_prompt[-2000:]
+            if not vresult.passed:
+                logger.warning("  [%s#a%d] CONSTRAINT FAIL (attempt %d/%d): %s", node.id, attempt, attempt + 1, max_attempts, "; ".join(vresult.details)[:300])
+                if self.config.verbose:
+                    logger.info("  [%s#a%d] constraint fail: %s", node.id, attempt, vresult.details)
+                if attempt < max_attempts - 1:
+                    detail_str = "; ".join(vresult.details) or "requirements not met"
+                    user_prompt = (
+                        f"Constraint check failed: {detail_str}\n\n"
+                        f"Fix the query to satisfy the constraints and try again."
+                    )
+                    continue
+                break
 
-        if best_path is None:
+            quality = self._check_result_quality(data)
+            if quality and "0 rows" in quality:
+                logger.warning("  [%s#a%d] EMPTY RESULT (attempt %d/%d)", node.id, attempt, attempt + 1, max_attempts)
+                signals.had_empty_result = True
+                path.path_score = evaluator.evaluate(vresult, signals, retriever_score)
+                break
+
+            node_result = NodeResult(
+                node_id=node.id,
+                data=data,
+                sql=sql,
+                confidence=confidence,
+                reasoning_paths=[path],
+                cost_tokens=total_cost,
+                path_score=path.path_score,
+                validation=vresult,
+            )
+            node_result.ambiguity_score = compute_ambiguity_score(node_result)
+
+            if path.path_score and path.path_score.total > best_pscore:
+                best_pscore = path.path_score.total
+                best_result = node_result
+
+            if self.config.verbose:
+                logger.info("  [%s#a%d] path_score=%.3f", node.id, attempt, best_pscore)
+            break
+
+        if best_result is None:
             result = NodeResult(
                 node_id=node.id,
                 data=pd.DataFrame(),
                 sql="",
                 confidence=0.0,
-                reasoning_paths=paths,
+                reasoning_paths=all_paths,
                 cost_tokens=total_cost,
                 error="No valid SQL generated",
             )
             result.ambiguity_score = 1.0
-            return result
+            return result, False
 
-        if self.config.calibration_enabled:
-            best_path.confidence = calibrate(best_path.confidence, signals)
-
-        try:
-            final_data = self.executor.execute(best_path.sql)
-        except Exception:
-            final_data = pd.DataFrame()
-
-        result = NodeResult(
-            node_id=node.id,
-            data=final_data,
-            sql=best_path.sql,
-            confidence=best_path.confidence,
-            reasoning_paths=paths,
-            cost_tokens=total_cost,
-        )
-        result.ambiguity_score = compute_ambiguity_score(result)
-        return result
+        best_result.reasoning_paths = all_paths
+        return best_result, True
 
     def _validate_sql(self, sql: str) -> str | None:
         from sqlglot import parse_one
@@ -280,22 +708,260 @@ class RLMAgent:
             return str(e)
 
     def _validate_schema(self, sql: str) -> str | None:
+        import sqlglot
         from sqlglot import parse_one
-        from sqlglot.expressions import Column
+        from sqlglot.expressions import Column, Alias
 
         try:
             tree = parse_one(sql)
         except Exception:
             return None
 
+        allowed = self._allowed_tables
+        known: set[str] = set()
+        if allowed:
+            known = {
+                s.name.lower()
+                for s in (self.all_schemas or [])
+            } or {t.lower() for t in self.executor.list_tables()}
+            for t in self._extract_table_names(sql):
+                if t in known and t not in {a.lower() for a in allowed}:
+                    return (
+                        f"Table '{t}' is outside the allowed search scope. "
+                        f"Use only: {', '.join(sorted(allowed))}"
+                    )
+
+        if self._attempt_scope is not None:
+            err = self._validate_scope_positions(tree, self._attempt_scope, known)
+            if err is not None:
+                return err
+
         valid_columns = self._build_valid_columns()
 
+        select_aliases: set[str] = set()
+        for alias in tree.find_all(Alias):
+            select_aliases.add(alias.alias.lower())
+
+        order_by_aliases: set[str] = set()
+        having_aliases: set[str] = set()
+        for statement in (tree for tree in [tree] if isinstance(tree, sqlglot.expressions.Select)):
+            for order in statement.args.get("order", sqlglot.expressions.Order(expressions=[])).expressions:
+                if isinstance(order, Column) and order.name.lower() in select_aliases:
+                    order_by_aliases.add(order.name.lower())
+            having = statement.args.get("having")
+            if having:
+                for col in having.find_all(Column):
+                    if col.name.lower() in select_aliases:
+                        having_aliases.add(col.name.lower())
+
+        exempt = select_aliases | order_by_aliases | having_aliases
+
         for col in tree.find_all(Column):
+            if self._is_diff_unit_arg(col):
+                continue
             col_name = col.name.lower()
-            if col_name in valid_columns:
+            if col_name in valid_columns or col_name in exempt:
                 continue
             suggestions = ", ".join(sorted(valid_columns - {"*"}))
             return f"Unknown column '{col.name}'. Available columns: {suggestions}"
+
+        return None
+
+    def _validate_scope_positions(
+        self, tree: Any, scope: AttemptSchemaContext, known: set[str]
+    ) -> str | None:
+        """Enforce the candidate execution invariant (S3).
+
+        FROM  -> PRIMARY | TASK CONTEXT (materialized)
+        JOIN  -> PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
+        OUT   -> never
+
+        A JOIN-AVAILABLE table used as the FROM anchor is a 'primary switch':
+        the model picks candidate X but anchors the SQL on Y, so the attempt
+        stops testing X. The search boundary then degenerates — every candidate
+        runs identical SQL and selection ties (the S5 log signature). Reject
+        the switch with actionable feedback instead. Only *known physical*
+        tables are enforced for drift: unknown tables keep surfacing as
+        execution errors (documented contract), never schema errors.
+
+        v0.3.5b: TASK CONTEXT (`_task_context_*`) is a *materialized* namespace
+        and is allowed in both FROM and JOIN — but only when the name exists in
+        this attempt's `task_contexts`. A context name that was never produced
+        (or a dependency that did not materialize) is rejected.
+        """
+        from sqlglot.expressions import CTE, From, Join, Table
+
+        primary = {p.lower() for p in scope.primary_tables}
+        join_avail = {j.lower() for j in scope.join_available_tables}
+        context_names = {c.table_name.lower() for c in scope.task_contexts}
+        materialized_ctx = {
+            c.table_name.lower() for c in scope.task_contexts if c.materialized
+        }
+
+        cte_names: set[str] = set()
+        for cte in tree.find_all(CTE):
+            cte_names.add(cte.alias_or_name.lower())
+
+        from_tables: set[str] = set()
+        join_tables: set[str] = set()
+        for tbl in tree.find_all(Table):
+            name = tbl.name.lower()
+            if name in cte_names:
+                continue
+            if isinstance(tbl.parent, From):
+                from_tables.add(name)
+            elif isinstance(tbl.parent, Join):
+                join_tables.add(name)
+
+        referenced = from_tables | join_tables
+
+        # A `_task_context_*` name that was never materialized (either not
+        # produced at all, or its dependency did not end SOLVED) is rejected.
+        # Unmaterialized contexts are not real tables — the dependent task must
+        # re-derive from the physical sources (AMBIGUOUS/FAILED parents never
+        # materialize, so their result must not be treated as ground truth).
+        unknown_ctx = {
+            t for t in referenced
+            if t.startswith("_task_context_") and t not in materialized_ctx
+        }
+        if unknown_ctx:
+            name = sorted(unknown_ctx)[0]
+            avail = ", ".join(sorted(materialized_ctx)) or "(none)"
+            return (
+                f"Table '{name}' is not a materialized TASK CONTEXT available "
+                f"to this attempt. Available contexts: {avail}. Use only "
+                f"materialized dependency results from your parent tasks."
+            )
+
+        bad_from = {t for t in from_tables - primary - materialized_ctx if t in known}
+        if bad_from:
+            name = sorted(bad_from)[0]
+            rest = ", ".join(sorted(join_avail)) or "none available"
+            return (
+                f"Table '{name}' appears in FROM, but the primary table for this "
+                f"attempt is '{sorted(primary)[0]}'. FROM must anchor on the "
+                f"candidate table under test or a TASK CONTEXT. You may JOIN "
+                f"supporting tables only: {rest}."
+            )
+
+        bad_join = {t for t in join_tables - (primary | join_avail | materialized_ctx) if t in known}
+        if bad_join:
+            name = sorted(bad_join)[0]
+            return (
+                f"Table '{name}' is used in JOIN but is outside this attempt's "
+                f"scope. Allowed: {', '.join(sorted(primary | join_avail | context_names)) or '(none)'}."
+            )
+
+        return None
+
+    @staticmethod
+    def _is_diff_unit_arg(col: Any) -> bool:
+        """True when a Column is the unit argument of DATEDIFF/TIMESTAMPDIFF
+        (e.g. `DAY` in `TIMESTAMPDIFF(DAY, paid_at, shipped_at)`).
+
+        The unit is parsed as a Column but is a keyword/literal, not a real
+        column reference. Rejecting it as "unknown column" (S6) forced the
+        RLM away from correct date-diff SQL. The 2-arg form
+        (`DATEDIFF(shipped_at, paid_at)`) has no `unit` arg, so its `this`
+        column is preserved.
+        """
+        from sqlglot.expressions import DateDiff, TimestampDiff
+
+        parent = col.parent
+        if isinstance(parent, (DateDiff, TimestampDiff)):
+            unit = parent.args.get("unit")
+            if unit is not None and parent.args.get("this") is col:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_table_names(sql: str) -> set[str]:
+        """Physical tables referenced by a SQL statement (CTEs excluded)."""
+        from sqlglot import parse_one
+        from sqlglot.expressions import Table
+
+        try:
+            tree = parse_one(sql)
+        except Exception:
+            return set()
+        ctes: set[str] = set()
+        with_clause = tree.args.get("with_") or tree.args.get("with")
+        if with_clause is not None:
+            for cte in with_clause.expressions:
+                ctes.add(cte.alias_or_name.lower())
+        names: set[str] = set()
+        for t in tree.find_all(Table):
+            if t.name.lower() not in ctes:
+                names.add(t.name.lower())
+        return names
+
+    @staticmethod
+    def _extract_context_refs(sql: str) -> bool:
+        """True if a SQL statement references a materialized `_task_context_*`
+        table in FROM/JOIN (CTEs excluded). Context SQL Usage metric."""
+        from sqlglot import parse_one
+        from sqlglot.expressions import CTE, From, Join, Table
+
+        try:
+            tree = parse_one(sql)
+        except Exception:
+            return False
+        cte_names: set[str] = set()
+        for cte in tree.find_all(CTE):
+            cte_names.add(cte.alias_or_name.lower())
+        for tbl in tree.find_all(Table):
+            if tbl.name.lower() in cte_names:
+                continue
+            if tbl.name.lower().startswith("_task_context_"):
+                if isinstance(tbl.parent, (From, Join)):
+                    return True
+        return False
+
+    def _validate_aliases(self, sql: str, node: TaskNode) -> str | None:
+        from sqlglot import parse_one
+        from sqlglot.expressions import Alias
+
+        try:
+            tree = parse_one(sql)
+        except Exception:
+            return None
+
+        year_pattern = re.compile(r'\b(19|20)\d{2}\b')
+
+        for alias_node in tree.find_all(Alias):
+            raw = alias_node.alias
+            if isinstance(raw, str):
+                alias_name = raw
+            else:
+                alias_name = getattr(raw, 'name', '')
+            if not alias_name:
+                continue
+
+            if year_pattern.search(alias_name):
+                return (
+                    f"Alias '{alias_name}' contains a year or date. "
+                    f"Do not embed dates or years in column aliases. "
+                    f"Use a short business-domain term."
+                )
+
+            if len(alias_name) > 50:
+                return (
+                    f"Alias '{alias_name}' is too long ({len(alias_name)} chars). "
+                    f"Use a short business-domain term."
+                )
+
+            tokens = alias_name.split("_")
+            # Only reject when the alias *starts* with a question word
+            # (e.g. "what_is_revenue"). "within"/"between" are legitimate
+            # domain prepositions (within_24h, between_dates) and must not
+            # be treated as question text (S7 ALIAS FAIL loop).
+            question_words = {"what", "which", "show", "give", "find", "get",
+                              "list", "calculate", "compute"}
+            if tokens and tokens[0] in question_words:
+                return (
+                    f"Alias '{alias_name}' reads like question text. "
+                    f"Use a business-domain term instead."
+                )
 
         return None
 
@@ -314,30 +980,6 @@ class RLMAgent:
                 f"Consider adding LIMIT or aggregation."
             )
         return None
-
-    def _is_non_recoverable(self, error_msg: str, node: TaskNode) -> bool:
-        """Determine if an execution error requires replanning vs simple retry."""
-        # Table not found → replan (missing table in available schemas)
-        if any(phrase in error_msg for phrase in
-               ["no such table", "table not found", "doesn't exist",
-                "table does not exist", "relation", "not found"]):
-            return True
-        # Join path impossible
-        if "ambiguous column" in error_msg:
-            return True
-        # If hint_tables are available but the error references a missing table
-        if node.hint_tables:
-            for t in node.hint_tables:
-                if t.lower() in error_msg and "not found" in error_msg:
-                    return True
-        return False
-
-    @staticmethod
-    def _build_replan_reason(error_msg: str, node: TaskNode) -> str:
-        reason = f"Execution failed for node {node.id}: {error_msg[:200]}"
-        if node.hint_tables:
-            reason += f" | hint_tables: {node.hint_tables}"
-        return reason
 
     def _extract_sql(self, content: str) -> str:
         import re
