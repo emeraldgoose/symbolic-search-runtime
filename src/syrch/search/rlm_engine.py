@@ -20,6 +20,7 @@ from syrch.core.models import (
     ScoredTable,
     TableSchema,
     TaskNode,
+    base_table_name,
 )
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
@@ -721,11 +722,12 @@ class RLMAgent:
         known: set[str] = set()
         if allowed:
             known = {
-                s.name.lower()
+                base_table_name(s.name).lower()
                 for s in (self.all_schemas or [])
-            } or {t.lower() for t in self.executor.list_tables()}
+            } or {base_table_name(t).lower() for t in self.executor.list_tables()}
+            allowed_base = {base_table_name(a).lower() for a in allowed}
             for t in self._extract_table_names(sql):
-                if t in known and t not in {a.lower() for a in allowed}:
+                if t in known and t not in allowed_base:
                     return (
                         f"Table '{t}' is outside the allowed search scope. "
                         f"Use only: {', '.join(sorted(allowed))}"
@@ -791,8 +793,8 @@ class RLMAgent:
         """
         from sqlglot.expressions import CTE, From, Join, Table
 
-        primary = {p.lower() for p in scope.primary_tables}
-        join_avail = {j.lower() for j in scope.join_available_tables}
+        primary = {base_table_name(p).lower() for p in scope.primary_tables}
+        join_avail = {base_table_name(j).lower() for j in scope.join_available_tables}
         context_names = {c.table_name.lower() for c in scope.task_contexts}
         materialized_ctx = {
             c.table_name.lower() for c in scope.task_contexts if c.materialized

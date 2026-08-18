@@ -326,6 +326,117 @@ def test_validate_schema_from_scope_blocks_drift():
     ) is None
 
 
+def test_validate_schema_fqn_drift_guard_works():
+    """S5 drift guard must survive fully-qualified names: sqlglot parses
+    `catalog.schema.table` into Table.name = base name, so the known/allowed
+    comparison must be done on the base name too. Previously an FQN FROM table
+    never matched the allowed scope and the guard silently passed everything."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ColumnSchema, ScoredTable, TableSchema, TaskNode
+
+    class MultiTableExecutor:
+        def execute(self, sql: str):
+            import pandas as pd
+            return pd.DataFrame({"x": [1]})
+
+        def get_schema(self, table_name=None):
+            if table_name == "syrch_benchmark.enterprise.dw_sales_order":
+                return TableSchema(
+                    name="syrch_benchmark.enterprise.dw_sales_order",
+                    columns=[ColumnSchema(name="id", type="INTEGER"),
+                             ColumnSchema(name="total_amount", type="REAL")],
+                )
+            return TableSchema(
+                name="syrch_benchmark.enterprise.mart_sales_monthly",
+                columns=[ColumnSchema(name="total", type="REAL")],
+            )
+
+        def list_tables(self):
+            return ["syrch_benchmark.enterprise.dw_sales_order",
+                    "syrch_benchmark.enterprise.mart_sales_monthly"]
+
+        def close(self):
+            pass
+
+    class FakeLLMBase:
+        def generate(self, *a, **kw): raise NotImplementedError
+        def generate_json(self, *a, **kw): return {}
+
+    config = ExecutionConfig(question="t", db_path=":memory:")
+    agent = RLMAgent(FakeLLMBase(), MultiTableExecutor(), config)
+    agent._candidate_pool = [
+        ScoredTable(
+            schema=TableSchema(
+                name="syrch_benchmark.enterprise.mart_sales_monthly",
+                columns=[ColumnSchema(name="total", type="REAL")],
+            ),
+            score=1.0,
+        ),
+    ]
+    node = TaskNode(id="A", description="t", is_atomic=True)
+    cand = agent._candidate_pool[0]
+    agent._attempt_scope = agent._build_attempt_schemas(node, cand)
+    agent._allowed_tables = agent._attempt_scope.allowed_tables
+
+    # in-scope FQN table passes
+    assert agent._validate_schema(
+        "SELECT total FROM syrch_benchmark.enterprise.mart_sales_monthly"
+    ) is None
+    # FQN drift to a physical pool-external table is rejected (S5)
+    err = agent._validate_schema(
+        "SELECT SUM(total_amount) FROM syrch_benchmark.enterprise.dw_sales_order"
+    )
+    assert err is not None and "outside the allowed search scope" in err
+
+
+def test_validate_scope_positions_fqn_primary_switch_rejected():
+    """S3 position invariant must survive FQN: candidate = dw_customer but SQL
+    anchors FROM on a JOIN-AVAILABLE table (rpt_customer_ltv) is a primary
+    switch and must be rejected. Previously base-name comparison against the
+    FQN scope let every candidate's SQL pass with the same FROM."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ColumnSchema, ScoredTable, TableSchema, TaskNode
+
+    schemas = [
+        TableSchema(name="syrch_benchmark.enterprise.dw_customer",
+                    columns=[ColumnSchema(name="customer_id", type="INTEGER")]),
+        TableSchema(name="syrch_benchmark.enterprise.rpt_customer_ltv",
+                    columns=[ColumnSchema(name="customer_id", type="INTEGER"),
+                             ColumnSchema(name="segment", type="STRING")]),
+    ]
+    agent = RLMAgent.__new__(RLMAgent)
+    agent.all_schemas = schemas
+
+    class Executor:
+        def list_tables(self):
+            return [s.name for s in schemas]
+        def get_schema(self, table_name=None):
+            return schemas[0] if table_name == schemas[0].name else schemas[1]
+    agent.executor = Executor()
+
+    pool = [ScoredTable(schema=s, score=1.0) for s in schemas]
+    agent._candidate_pool = pool
+
+    node = TaskNode(id="A", description="vip customers", is_atomic=True)
+    scope = agent._build_attempt_schemas(node, pool[0])  # primary = dw_customer
+    agent._attempt_scope = scope
+    agent._allowed_tables = scope.allowed_tables
+    assert "syrch_benchmark.enterprise.rpt_customer_ltv" in scope.join_available_tables
+
+    # primary switch: candidate=dw_customer but FROM anchors on rpt_customer_ltv
+    sql = (
+        "SELECT customer_id FROM syrch_benchmark.enterprise.rpt_customer_ltv "
+        "WHERE segment = 'VIP'"
+    )
+    err = agent._validate_schema(sql)
+    assert err is not None and "appears in FROM" in err
+    assert "dw_customer" in err
+
+    # anchored on the candidate -> passes
+    ok_sql = "SELECT customer_id FROM syrch_benchmark.enterprise.dw_customer"
+    assert agent._validate_schema(ok_sql) is None
+
+
 def test_check_result_quality_direct():
     from syrch.search.rlm_engine import RLMAgent
     import pandas as pd
