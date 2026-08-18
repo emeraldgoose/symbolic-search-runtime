@@ -1178,6 +1178,56 @@ def test_s5_drift_guard_preserved_under_scope():
     assert err is not None and "outside the allowed search scope" in err
 
 
+def test_qualified_column_must_exist_on_that_table():
+    """A qualified reference `alias.col` must resolve against the columns of
+    THAT table, not the global union of all schemas. Previously a column that
+    existed only on `dw_customer` (e.g. customer_id) let
+    `mart_sales_daily.customer_id` pass schema validation and fail only at
+    execution with UNRESOLVED_COLUMN."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ColumnSchema, ScoredTable, TableSchema, TaskNode
+
+    schemas = [
+        TableSchema(name="mart_sales_daily", columns=[ColumnSchema(name="sale_date", type="DATE")]),
+        TableSchema(name="dw_customer", columns=[ColumnSchema(name="customer_id", type="INTEGER")]),
+    ]
+    agent = RLMAgent.__new__(RLMAgent)
+    agent.all_schemas = schemas
+    agent._compressed_schemas = None
+
+    class Executor:
+        def list_tables(self):
+            return ["mart_sales_daily", "dw_customer"]
+        def get_schema(self, table_name=None):
+            return schemas[0] if table_name == "mart_sales_daily" else schemas[1]
+    agent.executor = Executor()
+
+    pool = [ScoredTable(schema=s, score=1.0) for s in schemas]
+    agent._candidate_pool = pool
+
+    node = TaskNode(id="A", description="daily sales", is_atomic=True)
+    node.hint_tables = ["dw_customer"]  # make dw_customer join-available
+    scope = agent._build_attempt_schemas(node, pool[0])
+    agent._attempt_scope = scope
+    agent._allowed_tables = scope.allowed_tables
+    assert "dw_customer" in scope.join_available_tables
+
+    # customer_id exists in the schema (dw_customer) but NOT on mart_sales_daily
+    sql = (
+        "SELECT m.customer_id FROM mart_sales_daily m "
+        "JOIN dw_customer c ON m.customer_id = c.customer_id"
+    )
+    err = agent._validate_schema(sql)
+    assert err is not None, "qualified column missing from its table must fail"
+    assert "m.customer_id" in err
+    assert "mart_sales_daily" in err
+    assert "sale_date" in err  # actionable: lists the table's real columns
+
+    # a qualified column that DOES exist on the table passes
+    ok_sql = "SELECT m.sale_date FROM mart_sales_daily m"
+    assert agent._validate_schema(ok_sql) is None
+
+
 def test_join_available_table_in_from_is_primary_switch():
     """S3 invariant: a JOIN-AVAILABLE table used as the FROM anchor is a
     'primary switch' — rejected even though the table is within allowed_tables."""
@@ -1305,7 +1355,13 @@ def test_task_context_in_join_is_allowed_when_materialized():
     )
 
     schemas = [
-        TableSchema(name="dw_sales_order", columns=[ColumnSchema(name="total_amount", type="REAL")]),
+        TableSchema(
+            name="dw_sales_order",
+            columns=[
+                ColumnSchema(name="order_id", type="INTEGER"),
+                ColumnSchema(name="total_amount", type="REAL"),
+            ],
+        ),
     ]
     agent = RLMAgent.__new__(RLMAgent)
     agent.all_schemas = schemas

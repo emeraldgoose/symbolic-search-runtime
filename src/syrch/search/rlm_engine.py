@@ -728,7 +728,7 @@ class RLMAgent:
     def _validate_schema(self, sql: str) -> str | None:
         import sqlglot
         from sqlglot import parse_one
-        from sqlglot.expressions import Column, Alias
+        from sqlglot.expressions import Alias, Column, Table
 
         try:
             tree = parse_one(sql)
@@ -775,10 +775,38 @@ class RLMAgent:
 
         exempt = select_aliases | order_by_aliases | having_aliases
 
+        schemas_by_base: dict[str, TableSchema] = {}
+        for s in (self.all_schemas or []) + (getattr(self, "_compressed_schemas", None) or []):
+            schemas_by_base[base_table_name(s.name).lower()] = s
+
+        qualifier_to_table: dict[str, str] = {}
+        for tbl in tree.find_all(Table):
+            base = base_table_name(tbl.name).lower()
+            qualifier_to_table.setdefault(base, base)
+            if tbl.alias:
+                qualifier_to_table.setdefault(tbl.alias.lower(), base)
+
         for col in tree.find_all(Column):
             if self._is_diff_unit_arg(col):
                 continue
             col_name = col.name.lower()
+            qualifier = (col.table or "").lower()
+            if qualifier:
+                # A qualified reference `alias.col` must resolve against the
+                # columns of THAT table — the global valid-columns union is too
+                # permissive (a column present only on `dw_customer` would let
+                # `mart_sales_daily.customer_id` pass here and fail only at
+                # execution with UNRESOLVED_COLUMN).
+                schema = schemas_by_base.get(qualifier_to_table.get(qualifier, qualifier))
+                if schema is not None:
+                    table_cols = {c.name.lower() for c in schema.columns}
+                    if col_name not in table_cols:
+                        avail = ", ".join(sorted(table_cols)) or "(no columns)"
+                        return (
+                            f"Unknown column '{col.table}.{col.name}': table "
+                            f"'{base_table_name(schema.name)}' has no column named "
+                            f"'{col.name}'. Columns in {base_table_name(schema.name)}: {avail}"
+                        )
             if col_name in valid_columns or col_name in exempt:
                 continue
             suggestions = ", ".join(sorted(valid_columns - {"*"}))
