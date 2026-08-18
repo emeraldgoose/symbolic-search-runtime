@@ -211,9 +211,60 @@ def test_rlm_agent_warns_empty_result():
     node = TaskNode(id="A", description="test task", is_atomic=True)
     result = agent.solve(node)
 
-    # Empty result breaks to next candidate (no retry for quality warnings)
-    assert llm.count == 1
-    assert len(result.reasoning_paths) == 1
+    # Empty result now retries with feedback (up to max_attempts) instead of
+    # breaking immediately, so the model learns its filter produced 0 rows.
+    assert llm.count == 3
+    assert len(result.reasoning_paths) == 3
+    assert result.error == "No valid SQL generated"
+
+
+def test_rlm_agent_empty_result_feedback_reaches_llm():
+    from syrch.search.rlm_engine import RLMAgent
+
+    class EmptyThenRecoverLLM:
+        def __init__(self):
+            self.count = 0
+            self.prompts: list[str] = []
+
+        def generate(self, system: str, user: str, **kwargs):
+            self.count += 1
+            self.prompts.append(user)
+            if self.count == 1:
+                content = "```sql\nSELECT x FROM test WHERE x > 1000\n```\nconfidence: 0.6"
+            else:
+                content = "```sql\nSELECT x FROM test WHERE x > 10\n```\nconfidence: 0.9"
+            return type("Response", (), {"content": content, "model": "test", "usage": {"completion_tokens": 10}})()
+
+        def generate_json(self, *a, **kw):
+            return {}
+
+    class RecoverExecutor(EmptyResultExecutor):
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.calls += 1
+            if self.calls == 1:
+                return pd.DataFrame()
+            return pd.DataFrame({"x": [50, 200]})
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+    )
+    llm = EmptyThenRecoverLLM()
+    executor = RecoverExecutor()
+    agent = RLMAgent(llm, executor, config)
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    result = agent.solve(node)
+
+    # The empty-result feedback must reach the next attempt's prompt.
+    assert "returned 0 rows" in llm.prompts[1]
+    assert llm.count == 2
+    assert len(result.reasoning_paths) == 2
+    assert result.sql == "SELECT x FROM test WHERE x > 10"
+    assert result.confidence == pytest.approx(0.9, rel=1e-2)
 
 
 def test_validate_sql_direct():

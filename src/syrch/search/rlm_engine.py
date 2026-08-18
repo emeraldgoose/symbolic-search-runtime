@@ -669,6 +669,13 @@ class RLMAgent:
             if quality and "0 rows" in quality:
                 logger.warning("  [%s#a%d] EMPTY RESULT (attempt %d/%d)", node.id, attempt, attempt + 1, max_attempts)
                 signals.had_empty_result = True
+                if attempt < max_attempts - 1:
+                    attempt_feedback.append(
+                        "SQL executed successfully but returned 0 rows. The filter "
+                        "columns, filter values, or join keys may be wrong — "
+                        "reconsider which columns hold the required data and retry."
+                    )
+                    continue
                 path.path_score = evaluator.evaluate(vresult, signals, retriever_score)
                 break
 
