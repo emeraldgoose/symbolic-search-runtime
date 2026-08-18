@@ -60,6 +60,11 @@ class SparkExecutor(BaseExecutor):
                 return self._spark.sql(sql).toPandas()
             raise
 
+    @property
+    def db_id(self) -> str:
+        parts = [p for p in (self._catalog, self._schema_name) if p]
+        return f"spark:{'.'.join(parts)}"
+
     def get_schema(self, table_name: str | None = None) -> TableSchema:
         if table_name is None:
             table_name = self.list_tables()[0]

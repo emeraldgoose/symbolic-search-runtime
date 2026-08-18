@@ -18,16 +18,29 @@ class CachedExecutor(BaseExecutor):
     def cache(self) -> CentralCache:
         return self._cache
 
+    @property
+    def db_id(self) -> str:
+        return self._inner.db_id
+
     def execute(self, sql: str) -> pd.DataFrame:
-        cached = self._cache.get("sql", sql=sql)
+        cached = self._cache.get("sql", db=self._inner.db_id, sql=sql)
         if cached is not None:
             return pd.read_json(StringIO(cached))
         result = self._inner.execute(sql)
-        self._cache.set("sql", result.to_json(), sql=sql)
+        self._cache.set("sql", result.to_json(), db=self._inner.db_id, sql=sql)
         return result
 
     def get_schema(self, table_name: str | None = None) -> TableSchema:
-        return self._inner.get_schema(table_name)
+        # `table_name=None` resolves to the DB's first table, so its result is
+        # not stable across table-list changes — don't cache that case.
+        if table_name is None:
+            return self._inner.get_schema(None)
+        cached = self._cache.get("schema", db=self._inner.db_id, table_name=table_name)
+        if cached is not None:
+            return cached
+        result = self._inner.get_schema(table_name)
+        self._cache.set("schema", result, db=self._inner.db_id, table_name=table_name)
+        return result
 
     def list_tables(self) -> list[str]:
         return self._inner.list_tables()

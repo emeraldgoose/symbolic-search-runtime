@@ -25,6 +25,10 @@ class JDBCExecutor(BaseExecutor):
         assert self._conn is not None
         return pd.read_sql(sql, self._conn)
 
+    @property
+    def db_id(self) -> str:
+        return f"jdbc:{self.connection_string}"
+
     def get_schema(self, table_name: str | None = None) -> TableSchema:
         if self._conn is None:
             self._connect()

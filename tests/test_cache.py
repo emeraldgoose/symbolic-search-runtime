@@ -29,15 +29,25 @@ class FakeLLM:
 
 
 class FakeExecutor:
-    def __init__(self):
+    def __init__(self, db_id: str = "fake:db"):
         self.execute_calls = 0
+        self.schema_calls = 0
+        self._db_id = db_id
+
+    @property
+    def db_id(self) -> str:
+        return self._db_id
 
     def execute(self, sql: str) -> pd.DataFrame:
         self.execute_calls += 1
         return pd.DataFrame({"result": [1, 2, 3]})
 
     def get_schema(self, table_name=None):
-        return None
+        from syrch.core.models import TableSchema, ColumnSchema
+
+        self.schema_calls += 1
+        name = table_name or "t"
+        return TableSchema(name=name, columns=[ColumnSchema(name="x", type="INT")])
 
     def list_tables(self):
         return []
@@ -138,3 +148,33 @@ class TestCachedExecutor:
         cached.execute("SELECT 1")
         cached.execute("SELECT 2")
         assert inner.execute_calls == 2
+
+    def test_caches_get_schema(self, tmp_cache):
+        inner = FakeExecutor()
+        cached = CachedExecutor(inner, tmp_cache)
+        s1 = cached.get_schema("t1")
+        assert inner.schema_calls == 1
+        s2 = cached.get_schema("t1")
+        assert inner.schema_calls == 1
+        assert s1.name == s2.name == "t1"
+
+    def test_schema_cache_scoped_by_db(self, tmp_cache):
+        inner_a = FakeExecutor(db_id="db:a")
+        inner_b = FakeExecutor(db_id="db:b")
+        cached_a = CachedExecutor(inner_a, tmp_cache)
+        cached_b = CachedExecutor(inner_b, tmp_cache)
+        cached_a.get_schema("orders")
+        assert inner_a.schema_calls == 1
+        assert inner_b.schema_calls == 0
+        cached_b.get_schema("orders")
+        assert inner_b.schema_calls == 1
+
+    def test_execute_cache_scoped_by_db(self, tmp_cache):
+        inner_a = FakeExecutor(db_id="db:a")
+        inner_b = FakeExecutor(db_id="db:b")
+        cached_a = CachedExecutor(inner_a, tmp_cache)
+        cached_b = CachedExecutor(inner_b, tmp_cache)
+        cached_a.execute("SELECT 1")
+        assert inner_a.execute_calls == 1
+        cached_b.execute("SELECT 1")
+        assert inner_b.execute_calls == 1

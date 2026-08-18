@@ -24,6 +24,16 @@ class BaseExecutor(ABC):
     def close(self) -> None:
         ...
 
+    @property
+    def db_id(self) -> str:
+        """Stable identifier of the underlying database.
+
+        Used to scope cache keys so two different databases (e.g. two Spark
+        catalogs/schemas, two SQLite files) never share cached SQL results or
+        cached table schemas. Subclasses override with a more specific id.
+        """
+        return f"{type(self).__module__}.{type(self).__name__}"
+
     def materialize_context(self, context: ParentContext) -> str:
         """Materialize a ParentContext's data into a physical table named
         `context.table_name` (e.g. `_task_context_A`) so dependent tasks can
