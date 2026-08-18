@@ -10,6 +10,7 @@ from syrch.core.models import (
     ScoredSchemaEvidence,
     ScoredTable,
     TableSchema,
+    base_table_name,
 )
 from syrch.search.semantic_index import SemanticIndex
 
@@ -250,7 +251,7 @@ class Retriever:
 
 
 def _table_name_score(keywords: set[str], table_name: str) -> tuple[float, list[str]]:
-    name_lower = table_name.lower()
+    name_lower = base_table_name(table_name).lower()
     name_parts = set(name_lower.split("_"))
     matched = keywords & name_parts
     if not matched:

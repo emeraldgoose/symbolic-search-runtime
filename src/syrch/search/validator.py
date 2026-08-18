@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlglot import parse_one
@@ -10,6 +11,27 @@ from syrch.core.models import RequirementSpec, ValidationResult
 from syrch.search.path_evaluator import _canonical_grain, infer_native_grain
 
 logger = logging.getLogger(__name__)
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^a-zA-Z0-9]+", name.lower()) if t}
+
+
+def _metric_matches(metric: str, candidate: str) -> bool:
+    """True when `metric` maps to `candidate` as a substring or token subset.
+
+    The planner emits *business* metric names (e.g. `precipitation_total`)
+    while the RLM maps them to physical columns (`precipitation_lwe_total`).
+    A strict substring check would reject that correct SQL, so we also accept
+    any candidate whose token set contains every metric token.
+    """
+    if metric.lower() in candidate.lower():
+        return True
+    m_tokens = _name_tokens(metric)
+    if not m_tokens:
+        return False
+    c_tokens = _name_tokens(candidate)
+    return m_tokens <= c_tokens
 
 
 class Validator:
@@ -40,10 +62,12 @@ class Validator:
             return result
 
         for metric in requirements.metrics:
-            col_name = metric.lower()
-            found = any(col_name in c.lower() for c in select_columns)
+            found = any(_metric_matches(metric, c) for c in select_columns)
             if not found:
-                found = any(col_name in valid_columns and col_name in sql for c in valid_columns)
+                found = any(
+                    _metric_matches(metric, col_name) and _metric_matches(metric, sql)
+                    for col_name in valid_columns
+                )
             if not found:
                 result.missing_metrics.append(metric)
 
@@ -99,7 +123,7 @@ class Validator:
                 pre_aggregated_grain = grain in {"monthly", "daily", "weekly", "quarterly"}
                 select_text = " ".join(select_columns).lower()
                 metrics_present = bool(requirements.metrics) and all(
-                    m.lower() in select_text for m in requirements.metrics
+                    _metric_matches(m, select_text) for m in requirements.metrics
                 )
                 if pre_aggregated_grain and metrics_present:
                     pass

@@ -9,6 +9,7 @@ from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.aggregator import Aggregator
 from syrch.search.planner import Planner
+from syrch.search.question_norm import normalize_question
 from syrch.search.retriever import Retriever, ScoredSchemaEvidence
 from syrch.search.scheduler import Scheduler
 from syrch.search.semantic_index import SemanticIndex
@@ -79,7 +80,8 @@ def run_pipeline(
     retriever = Retriever(problem.all_schemas, semantic_index=semantic_index if not semantic_index.is_empty else None)
 
     if problem.scored_schemas is None or problem.evidence is None:
-        evidence = retriever.score(problem.question)
+        search_question = normalize_question(llm, problem.question)
+        evidence = retriever.score(search_question)
         problem.scored_schemas = evidence.candidates
         problem.evidence = evidence
     else:
@@ -127,7 +129,7 @@ def run_pipeline(
                     scored_schemas=problem.scored_schemas,
                     evidence=problem.evidence,
                 )
-                evidence = retriever.score(problem.question)
+                evidence = retriever.score(normalize_question(llm, problem.question))
                 problem.scored_schemas = evidence.candidates
                 problem.evidence = evidence
         else:

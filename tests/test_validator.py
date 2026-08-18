@@ -73,6 +73,42 @@ def test_metric_fallback_case_insensitive():
     assert "revenue" not in result.missing_metrics
 
 
+def test_metric_token_subset_matches_physical_column():
+    validator = Validator()
+    sql = "SELECT SUM(precipitation_lwe_total) AS precipitation_lwe_total FROM samples.accuweather.forecast_daily_calendar_metric"
+    result = validator.validate(
+        sql,
+        _req(metrics=["precipitation_total"], aggregation="sum"),
+        valid_columns={"precipitation_lwe_total"},
+    )
+    assert result.passed is True
+    assert "precipitation_total" not in result.missing_metrics
+
+
+def test_metric_token_subset_matches_alias_with_extra_tokens():
+    validator = Validator()
+    sql = "SELECT AVG(humidity_relative_avg) AS humidity_relative_avg FROM samples.accuweather.forecast_daily_calendar_metric"
+    result = validator.validate(
+        sql,
+        _req(metrics=["humidity_avg"], aggregation="avg"),
+        valid_columns={"humidity_relative_avg"},
+    )
+    assert result.passed is True
+    assert "humidity_avg" not in result.missing_metrics
+
+
+def test_metric_token_missing_still_fails():
+    validator = Validator()
+    sql = "SELECT SUM(amount) FROM mart_sales_daily"
+    result = validator.validate(
+        sql,
+        _req(metrics=["precipitation_total"], aggregation="sum"),
+        valid_columns={"amount"},
+    )
+    assert result.passed is False
+    assert "precipitation_total" in result.missing_metrics
+
+
 def test_date_filter_column_case_insensitive():
     validator = Validator()
     sql = "SELECT SUM(amount) FROM dw_sales_order WHERE SALE_DATE >= '2024-01-01'"
