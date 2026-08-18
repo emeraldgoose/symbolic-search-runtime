@@ -27,6 +27,10 @@ class SQLiteExecutor(BaseExecutor):
             self._local.conn = sqlite3.connect(self.path)
         return self._local.conn
 
+    @property
+    def db_id(self) -> str:
+        return f"sqlite:{self.path}"
+
     def execute(self, sql: str) -> pd.DataFrame:
         conn = self._get_conn()
         return pd.read_sql(sql, conn)

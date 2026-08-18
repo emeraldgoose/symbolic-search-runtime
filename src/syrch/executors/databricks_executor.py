@@ -94,6 +94,11 @@ class DatabricksExecutor(BaseExecutor):
             columns = [desc[0] for desc in cursor.description]
             return pd.DataFrame([list(r) for r in rows], columns=columns)
 
+    @property
+    def db_id(self) -> str:
+        parts = [p for p in (self.catalog, self.schema_name) if p]
+        return f"databricks:{self.server_hostname}:{'.'.join(parts)}"
+
     @staticmethod
     def _parse_fqn(fqn: str) -> tuple[str | None, str | None, str]:
         parts = fqn.split(".")
