@@ -1427,5 +1427,81 @@ def test_proxy_rule_rendered_in_attempt_prompt():
     assert "refund_reason" not in system
 
 
+class FeedbackCapturingLLM:
+    def __init__(self):
+        self.count = 0
+        self.retry_prompt = ""
+
+    def generate(self, system: str, user: str, **kwargs):
+        self.count += 1
+        if self.count == 1:
+            content = "```sql\nSELECT y FROM test\n```\nconfidence: 0.4"
+        else:
+            self.retry_prompt = user
+            content = "```sql\nSELECT x FROM test\n```\nconfidence: 0.9"
+        return type("Response", (), {"content": content, "model": "test", "usage": {"completion_tokens": 10}})()
+
+    def generate_json(self, *a, **kw):
+        return {}
+
+
+def test_rlm_agent_retry_includes_previous_error_feedback():
+    """Regression: on retry, the LLM prompt must include the previous
+    validation error. Previously the feedback was stored in `user_prompt` but
+    then overwritten when the next attempt rebuilt the prompt from scratch, so
+    the model saw an identical prompt every attempt and repeated the same SQL
+    (the v0.3.3 SCHEMA FAIL loop in Databricks logs)."""
+    from syrch.search.rlm_engine import RLMAgent
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+    )
+    llm = FeedbackCapturingLLM()
+    executor = FakeExecutor()
+    agent = RLMAgent(llm, executor, config)
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    result = agent.solve(node)
+
+    assert llm.count == 2
+    assert "Unknown column 'y'" in llm.retry_prompt
+    assert "fix" in llm.retry_prompt.lower()
+    assert result.confidence == pytest.approx(0.9, rel=1e-2)
+
+
+class StubbornSchemaLLM:
+    """Keeps emitting the same invalid SQL on every attempt (the Databricks
+    v0.3.3 signature: repeated identical SQL). Must terminate without raising."""
+
+    def __init__(self):
+        self.count = 0
+
+    def generate(self, system: str, user: str, **kwargs):
+        self.count += 1
+        return type("Response", (), {"content": "```sql\nSELECT y FROM test\n```\nconfidence: 0.4", "model": "test", "usage": {"completion_tokens": 10}})()
+
+    def generate_json(self, *a, **kw):
+        return {}
+
+
+def test_rlm_agent_stubborn_bad_sql_terminates_with_feedback_present():
+    from syrch.search.rlm_engine import RLMAgent
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+    )
+    llm = StubbornSchemaLLM()
+    executor = FakeExecutor()
+    agent = RLMAgent(llm, executor, config)
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    result = agent.solve(node)
+
+    assert llm.count == 3
+    assert result.status == "failed" or result.status.value == "failed"
+
+
 
 

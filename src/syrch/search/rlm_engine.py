@@ -527,6 +527,7 @@ class RLMAgent:
         all_paths: list[ReasoningPath] = []
         total_cost = 0
         max_attempts = self.config.max_attempts_per_node
+        attempt_feedback: list[str] = []
 
         for attempt in range(max_attempts):
             signals = ExecutionSignals(max_attempts=max_attempts)
@@ -549,6 +550,12 @@ class RLMAgent:
                     f"{context_vars}\n"
                 )
             user_prompt += "\nGenerate a SQL query and confidence score."
+            if attempt_feedback:
+                user_prompt += (
+                    "\n\nPrevious attempt failed. Fix the reported problems "
+                    "and produce a corrected SQL query:\n"
+                    + "\n".join(f"- {msg}" for msg in attempt_feedback)
+                )
 
             response = self.llm.generate(system, user_prompt, max_tokens=max_tokens)
             sql = self._extract_sql(response.content)
@@ -584,7 +591,7 @@ class RLMAgent:
                 signals.syntax_errors += 1
                 all_paths.append(path)
                 if attempt < max_attempts - 1:
-                    user_prompt = f"SQL syntax error: {syntax_err}\n\nFix it and try again."
+                    attempt_feedback.append(f"SQL syntax error: {syntax_err}")
                     continue
                 break
 
@@ -594,7 +601,7 @@ class RLMAgent:
                 signals.schema_errors += 1
                 all_paths.append(path)
                 if attempt < max_attempts - 1:
-                    user_prompt = f"SQL semantic error: {schema_err}\n\nFix it and try again."
+                    attempt_feedback.append(f"SQL semantic error: {schema_err}")
                     continue
                 break
 
@@ -603,6 +610,7 @@ class RLMAgent:
                 logger.warning("  [%s#a%d] ALIAS FAIL: %s", node.id, attempt, alias_err)
                 signals.quality_warnings.append(alias_err)
                 all_paths.append(path)
+                attempt_feedback.append(f"SQL alias error: {alias_err}")
                 continue
 
             try:
@@ -617,9 +625,11 @@ class RLMAgent:
                 all_paths.append(path)
                 if attempt < max_attempts - 1:
                     if is_wrong_table:
-                        user_prompt = f"SQL execution error: {e}\n\nUse only the tables shown in the schema above.\n\nTry again."
+                        attempt_feedback.append(
+                            f"SQL execution error: {e}. Use only the tables shown in the schema above."
+                        )
                     else:
-                        user_prompt = f"SQL execution error: {e}\n\nTry again."
+                        attempt_feedback.append(f"SQL execution error: {e}")
                     continue
                 path.path_score = evaluator.evaluate(None, signals, retriever_score)
                 node_result = NodeResult(
