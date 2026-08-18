@@ -50,14 +50,21 @@ _LAYER_BY_PREFIX: tuple[tuple[str, str], ...] = (
 )
 
 
+def base_table_name(table_name: str) -> str:
+    """Strip a catalog/schema prefix so layer/grain/name inference works on
+    fully-qualified names like `catalog.schema.dw_sales_order`."""
+    return table_name.split(".")[-1]
+
+
 def infer_layer(table_name: str) -> str:
     """Infer a table's layer from its name prefix.
 
     Feeds the retriever's grain-layer preference and layer penalties
     (`_apply_layer_adjustment`). Without it every table is `unknown` and the
-    grain-aware machinery never fires.
+    grain-aware machinery never fires. Fully-qualified names are matched on
+    the table part only (`catalog.schema.dw_sales_order` -> `dw`).
     """
-    name = table_name.lower()
+    name = base_table_name(table_name).lower()
     for prefix, layer in _LAYER_BY_PREFIX:
         if name.startswith(prefix):
             return layer

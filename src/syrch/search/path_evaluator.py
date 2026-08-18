@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from syrch.core.models import PathScore, TaskNode, ValidationResult
+from syrch.core.models import PathScore, TaskNode, ValidationResult, base_table_name
 from syrch.search.calibrator import ExecutionSignals
 
 
@@ -23,7 +23,7 @@ def infer_native_grain(table_name: str, layer: str | None = None) -> str | None:
     / dimension / staging tables return None (any grain is derivable by
     aggregation, but none is native).
     """
-    tokens = set(table_name.lower().split("_"))
+    tokens = set(base_table_name(table_name).lower().split("_"))
     for grain, markers in _GRAIN_MARKERS.items():
         if tokens & markers:
             return grain

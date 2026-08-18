@@ -1,7 +1,13 @@
 """Discrimination-signal tests (S1/S5/S15): grain/dimension/time match and the
 native-grain inference used to separate native vs derived tables."""
 
-from syrch.core.models import RequirementSpec, TableSchema, ColumnSchema, TaskNode
+from syrch.core.models import (
+    RequirementSpec,
+    TableSchema,
+    ColumnSchema,
+    TaskNode,
+    infer_layer,
+)
 from syrch.search.path_evaluator import PathEvaluator, infer_native_grain, _canonical_grain
 
 
@@ -32,6 +38,21 @@ def test_infer_native_grain_from_name():
     assert infer_native_grain("dw_sales_order") is None
     assert infer_native_grain("dim_customer") is None
     assert infer_native_grain("stg_raw") is None
+
+
+def test_infer_layer_matches_fully_qualified_names():
+    assert infer_layer("dw_sales_order") == "dw"
+    assert infer_layer("syrch_benchmark.enterprise.dw_sales_order") == "dw"
+    assert infer_layer("catalog.schema.mart_sales_monthly") == "mart"
+    assert infer_layer("catalog.schema.dim_date") == "dim"
+    assert infer_layer("some_schema.fact_events") == "fact"
+    assert infer_layer("catalog.schema.orders") == "unknown"
+
+
+def test_infer_native_grain_matches_fully_qualified_names():
+    assert infer_native_grain("catalog.schema.mart_sales_monthly") == "month"
+    assert infer_native_grain("catalog.schema.mart_sales_daily") == "day"
+    assert infer_native_grain("catalog.schema.dw_sales_order") is None
 
 
 def test_canonical_grain_maps_variants():
