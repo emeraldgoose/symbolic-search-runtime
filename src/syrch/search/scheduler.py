@@ -21,6 +21,7 @@ from syrch.core.models import (
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.planner import compute_layers
+from syrch.search.data_probe import ProbeRegistry
 from syrch.search.retriever import Retriever
 from syrch.search.rlm_engine import RLMAgent
 
@@ -56,6 +57,7 @@ class Scheduler:
         all_schemas: list | None = None,
         alias_map: dict[str, list[tuple[str, str, str | None]]] | None = None,
         candidate_pool: list[ScoredTable] | None = None,
+        probe_registry: ProbeRegistry | None = None,
     ):
         self.llm = llm
         self.executor = executor
@@ -64,11 +66,13 @@ class Scheduler:
             llm, executor, config,
             retriever=retriever, all_schemas=all_schemas,
             alias_map=alias_map, candidate_pool=candidate_pool,
+            probe_registry=probe_registry,
         )
         self.retriever = retriever
         self.all_schemas = all_schemas
         self.alias_map = alias_map
         self.candidate_pool = candidate_pool
+        self.probe_registry = probe_registry or ProbeRegistry()
         if compressed_schemas is not None:
             self._base_agent.set_compressed_schemas(compressed_schemas)
         self.replan_callback = replan_callback
@@ -81,6 +85,7 @@ class Scheduler:
             self.llm, self.executor, self.config,
             retriever=self.retriever, all_schemas=self.all_schemas,
             alias_map=self.alias_map, candidate_pool=self.candidate_pool,
+            probe_registry=self.probe_registry,
         )
 
     def run(self, dag: TaskDAG) -> dict[str, NodeResult]:

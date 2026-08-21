@@ -27,6 +27,7 @@ class SearchResult:
     tree: list[NodeResult] = field(default_factory=list, repr=False)
     dag_nodes: list[dict] = field(default_factory=list, repr=False)
     tables_used: list[str] = field(default_factory=list, repr=False)
+    calculation_basis: str = ""
 
 
 def _create_llm(config: LLMConfig) -> BaseLLM:
@@ -130,6 +131,7 @@ def query(
         tree=solution.tree,
         dag_nodes=_dag_to_dict(dag),
         tables_used=tables_used,
+        calculation_basis=solution.calculation_basis,
     )
 
 

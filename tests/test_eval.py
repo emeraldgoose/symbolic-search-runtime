@@ -446,3 +446,75 @@ def test_aggregator_failed_leaf_falls_back_to_solved_dependency():
     assert sol.confidence > 0.0
     # The FAILED leaf lowers confidence below the pure-solved level
     assert sol.confidence < 0.8
+
+
+def test_aggregator_calculation_basis_exposes_interpretation():
+    """Calculation basis must surface the exact join/filter/aggregate so a
+    domain-ambiguous interpretation (e.g. SCD 'purchase-time') is visible to
+    the user instead of being hidden inside the final number."""
+    from syrch.search.aggregator import Aggregator
+
+    class FakeLLM:
+        def generate(self, *a, **kw):
+            return type("R", (), {"content": "ok", "model": "t", "usage": {"completion_tokens": 1}})()
+
+    llm = FakeLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    agg = Aggregator(llm, None, config)
+
+    scd_sql = (
+        "SELECT SUM(o.total_amount) AS vip_net_revenue\n"
+        "FROM dw_sales_order o\n"
+        "JOIN dw_customer c\n"
+        "  ON o.customer_id = c.customer_id\n"
+        "  AND o.order_date >= c.valid_from\n"
+        "  AND (c.valid_to IS NULL OR o.order_date <= c.valid_to)\n"
+        "WHERE o.order_date >= '2024-01-01' AND o.order_date < '2025-01-01'\n"
+        "  AND o.status != 'refunded' AND c.segment = 'VIP'\n"
+    )
+    set_sql = (
+        "SELECT SUM(dso.total_amount) AS total_net_revenue\n"
+        "FROM _task_context_A vips\n"
+        "JOIN dw_sales_order dso ON vips.customer_id = dso.customer_id\n"
+        "WHERE dso.order_date >= '2024-01-01' AND dso.order_date <= '2024-12-31'\n"
+    )
+
+    basis_scd = agg._summarize_sql(scd_sql, {})
+    basis_set = agg._summarize_sql(set_sql, {})
+
+    # SCD: the order-time validity join + refund exclusion must be visible
+    assert "dw_sales_order" in basis_scd and "dw_customer" in basis_scd
+    assert "valid_from" in basis_scd and "valid_to" in basis_scd
+    assert "refunded" in basis_scd
+    assert "SUM(o.total_amount)" in basis_scd
+    # Set-based: the loss of the SCD window and the refund filter must be visible
+    assert "_task_context_A" in basis_set
+    assert "refunded" not in basis_set
+    assert "valid_from" not in basis_set
+    # The two interpretations must produce distinguishable bases
+    assert basis_scd != basis_set
+
+
+def test_aggregator_calculation_basis_merges_node_sql():
+    from syrch.search.aggregator import Aggregator
+
+    class FakeLLM:
+        def generate(self, *a, **kw):
+            return type("R", (), {"content": "ok", "model": "t", "usage": {"completion_tokens": 1}})()
+
+    llm = FakeLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    agg = Aggregator(llm, None, config)
+
+    sol = FinalSolution(
+        question="q", answer="a",
+        calculation_basis=agg._build_calculation_basis(
+            ["SELECT COUNT(*) FROM t1 WHERE active = 1",
+             "SELECT SUM(x) FROM t2"],
+            {},
+        ),
+    )
+    assert "COUNT(*)" in sol.calculation_basis
+    assert "SUM(x)" in sol.calculation_basis
+    assert "t1" in sol.calculation_basis and "t2" in sol.calculation_basis
+    assert "active = 1" in sol.calculation_basis
