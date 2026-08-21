@@ -26,6 +26,7 @@ from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.calibrator import ExecutionSignals
 from syrch.search.clarify import compute_ambiguity_score
+from syrch.search.data_probe import DataProbe, ProbeRegistry, ProbeResult
 from syrch.search.path_evaluator import PathEvaluator
 from syrch.search.retriever import Retriever
 from syrch.search.search_policy import build_policy
@@ -100,6 +101,7 @@ class RLMAgent:
         all_schemas: list | None = None,
         alias_map: dict[str, list[tuple[str, str, str | None]]] | None = None,
         candidate_pool: list[ScoredTable] | None = None,
+        probe_registry: ProbeRegistry | None = None,
     ):
         self.llm = llm
         self.executor = executor
@@ -111,6 +113,7 @@ class RLMAgent:
         self._candidate_pool: list[ScoredTable] = candidate_pool or []
         self._allowed_tables: set[str] | None = None
         self._attempt_scope: AttemptSchemaContext | None = None
+        self.probe = DataProbe(executor, probe_registry)
 
     def set_compressed_schemas(self, schemas: list | None) -> None:
         self._compressed_schemas = schemas
@@ -239,6 +242,22 @@ class RLMAgent:
         node: TaskNode,
         context: dict[str, ParentContext] | None = None,
     ) -> NodeResult:
+        infeasible = self._requirement_infeasible(node)
+        if infeasible is not None:
+            if self.config.verbose:
+                logger.warning("  [%s] requirement infeasible (probe): %s", node.id, infeasible)
+            result = NodeResult(
+                node_id=node.id,
+                data=pd.DataFrame(),
+                sql="",
+                confidence=0.0,
+                status=NodeStatus.FAILED,
+                error=infeasible,
+                cost_tokens=0,
+            )
+            result.replan_request = (ReplanType.STRUCTURAL, infeasible)
+            return result
+
         order = self._build_candidate_order(node)
         policy = build_policy(
             self.config.search_policy,
@@ -256,6 +275,13 @@ class RLMAgent:
         expansions = 0
 
         while True:
+            if self.config.verbose:
+                viable_now = [e for e in evaluations.values() if e.viable]
+                logger.info(
+                    "  [%s] policy index=%d/%d viable=%d eval=%d remaining=%d",
+                    node.id, policy._index, len(policy._candidates),
+                    len(viable_now), len(evaluations), len(policy.remaining()),
+                )
             if not policy.has_next():
                 viable = [e for e in evaluations.values() if e.viable]
                 if (
@@ -271,6 +297,11 @@ class RLMAgent:
                             node.id, expansions, self.config.max_candidate_expansion,
                         )
                     continue
+                if self.config.verbose:
+                    logger.info(
+                        "  [%s] policy exhausted index=%d/%d viable=%d",
+                        node.id, policy._index, len(policy._candidates), len(viable),
+                    )
                 break
 
             cand = policy.next()
@@ -297,6 +328,14 @@ class RLMAgent:
             policy.update(ev)
             if ok:
                 result_by_table[cand.schema.name] = result
+            if self.config.verbose:
+                logger.info(
+                    "  [%s] eval %s ok=%s viable=%s ps=%s rq=%.3f sm=%.3f gm=%.3f dm=%.3f tm=%.3f",
+                    node.id, cand.schema.name, ok, ev.viable,
+                    result.path_score.total if result.path_score else "None",
+                    ev.result_quality, ev.structural_match, ev.grain_match,
+                    ev.dimension_match, ev.time_match,
+                )
 
         viable = [e for e in evaluations.values() if e.viable]
 
@@ -357,6 +396,40 @@ class RLMAgent:
             e.result_quality,
             e.candidate_id,
         )
+
+    def _requirement_infeasible(self, node: TaskNode) -> str | None:
+        """Node-start feasibility gate driven by shared probe facts.
+
+        The planner picks supporting relations from schema alone, so it can
+        demand a relation whose filter value the probe already verified does
+        not exist (e.g. rpt_customer_ltv demanded 'to filter for VIP
+        customers' while the registry holds 'VIP NOT FOUND in
+        rpt_customer_ltv.segment'). Such a requirement is unsatisfiable by
+        construction — no amount of SQL retrying can satisfy it — so surface
+        a STRUCTURAL replan instead of burning attempts on it.
+        """
+        req = node.requirements
+        if req is None or not req.supporting_relations:
+            return None
+        facts = self.probe.registry.all()
+        if not facts:
+            return None
+        for sr in req.supporting_relations:
+            base = sr.table.split(".")[-1].lower()
+            purpose = (sr.purpose or "").lower()
+            if not purpose:
+                continue
+            for fact in facts:
+                if fact.exists:
+                    continue
+                if fact.table.split(".")[-1].lower() != base:
+                    continue
+                if fact.value.lower() in purpose:
+                    return (
+                        f"Supporting relation {sr.table} (purpose: {sr.purpose}) "
+                        f"is unsatisfiable: probe verified {fact.render()}"
+                    )
+        return None
 
     @staticmethod
     def _is_ambiguous(viable: list[CandidateEvaluation]) -> bool:
@@ -440,6 +513,13 @@ class RLMAgent:
                     seen.add(schema.name)
                     order.append(ScoredTable(schema=schema, score=0.0))
 
+        if self.config.verbose:
+            names = ", ".join(f"{c.schema.name}:{c.score:.2f}" for c in order)
+            logger.info(
+                "  [%s] candidate_order (%d) hint=%s pool=%d -> %s",
+                node.id, len(order), hint_names,
+                len(self._candidate_pool), names or "-",
+            )
         return order
 
     def _search_scope(self) -> set[str]:
@@ -601,7 +681,19 @@ class RLMAgent:
                 signals.schema_errors += 1
                 all_paths.append(path)
                 if attempt < max_attempts - 1:
-                    attempt_feedback.append(f"SQL semantic error: {schema_err}")
+                    probe_msg, skip_candidate = self._probe_empty_feedback(sql)
+                    if skip_candidate:
+                        logger.warning(
+                            "  [%s#a%d] CANDIDATE SKIP: PRIMARY provably lacks "
+                            "the filter value (verified NOT FOUND); moving to "
+                            "the next candidate",
+                            node.id, attempt,
+                        )
+                        break
+                    feedback = f"SQL semantic error: {schema_err}"
+                    if probe_msg:
+                        feedback = f"{feedback}\n{probe_msg}"
+                    attempt_feedback.append(feedback)
                     continue
                 break
 
@@ -670,8 +762,18 @@ class RLMAgent:
                 logger.warning("  [%s#a%d] EMPTY RESULT (attempt %d/%d)", node.id, attempt, attempt + 1, max_attempts)
                 signals.had_empty_result = True
                 if attempt < max_attempts - 1:
+                    probe_msg, skip_candidate = self._probe_empty_feedback(sql)
+                    if skip_candidate:
+                        logger.warning(
+                            "  [%s#a%d] CANDIDATE SKIP: PRIMARY provably lacks "
+                            "the filter value (verified NOT FOUND); moving to "
+                            "the next candidate",
+                            node.id, attempt,
+                        )
+                        break
                     attempt_feedback.append(
-                        "SQL executed successfully but returned 0 rows. The filter "
+                        probe_msg
+                        or "SQL executed successfully but returned 0 rows. The filter "
                         "columns, filter values, or join keys may be wrong — "
                         "reconsider which columns hold the required data and retry."
                     )
@@ -700,6 +802,8 @@ class RLMAgent:
             break
 
         if best_result is None:
+            if self.config.verbose:
+                logger.info("  [%s] attempt FAILED: no valid SQL (attempts=%d)", node.id, len(all_paths))
             result = NodeResult(
                 node_id=node.id,
                 data=pd.DataFrame(),
@@ -728,7 +832,7 @@ class RLMAgent:
     def _validate_schema(self, sql: str) -> str | None:
         import sqlglot
         from sqlglot import parse_one
-        from sqlglot.expressions import Column, Alias
+        from sqlglot.expressions import Alias, Column, Table
 
         try:
             tree = parse_one(sql)
@@ -775,10 +879,38 @@ class RLMAgent:
 
         exempt = select_aliases | order_by_aliases | having_aliases
 
+        schemas_by_base: dict[str, TableSchema] = {}
+        for s in (self.all_schemas or []) + (getattr(self, "_compressed_schemas", None) or []):
+            schemas_by_base[base_table_name(s.name).lower()] = s
+
+        qualifier_to_table: dict[str, str] = {}
+        for tbl in tree.find_all(Table):
+            base = base_table_name(tbl.name).lower()
+            qualifier_to_table.setdefault(base, base)
+            if tbl.alias:
+                qualifier_to_table.setdefault(tbl.alias.lower(), base)
+
         for col in tree.find_all(Column):
             if self._is_diff_unit_arg(col):
                 continue
             col_name = col.name.lower()
+            qualifier = (col.table or "").lower()
+            if qualifier:
+                # A qualified reference `alias.col` must resolve against the
+                # columns of THAT table — the global valid-columns union is too
+                # permissive (a column present only on `dw_customer` would let
+                # `mart_sales_daily.customer_id` pass here and fail only at
+                # execution with UNRESOLVED_COLUMN).
+                schema = schemas_by_base.get(qualifier_to_table.get(qualifier, qualifier))
+                if schema is not None:
+                    table_cols = {c.name.lower() for c in schema.columns}
+                    if col_name not in table_cols:
+                        avail = ", ".join(sorted(table_cols)) or "(no columns)"
+                        return (
+                            f"Unknown column '{col.table}.{col.name}': table "
+                            f"'{base_table_name(schema.name)}' has no column named "
+                            f"'{col.name}'. Columns in {base_table_name(schema.name)}: {avail}"
+                        )
             if col_name in valid_columns or col_name in exempt:
                 continue
             suggestions = ", ".join(sorted(valid_columns - {"*"}))
@@ -983,6 +1115,56 @@ class RLMAgent:
                 )
 
         return None
+
+    def _probe_empty_feedback(self, sql: str) -> tuple[str, bool]:
+        """Probe the failing SQL's filter literals against the candidate pool.
+
+        Returns (rendered, skip_candidate):
+          - rendered: a VERIFIED DATA FACTS block when a filter value exists in
+            some candidate table, so the model learns *where* the data lives.
+          - skip_candidate: True when a verified NOT FOUND holds for the current
+            PRIMARY table while the same value EXISTS in another pool table —
+            deterministic evidence the PRIMARY cannot produce the required rows,
+            so retrying it only repeats the same drift.
+        """
+        if not sql or not self._candidate_pool:
+            if self.config.verbose:
+                logger.info(
+                    "  [probe] skipped (sql=%s pool=%d)",
+                    bool(sql), len(self._candidate_pool),
+                )
+            return "", False
+        pool_names = [c.schema.name for c in self._candidate_pool]
+        facts = self.probe.probe_sql_filters(sql, pool_names)
+        anchored = DataProbe._extract_from_tables(sql)
+        rendered = self.probe.render_facts(facts, anchored_tables=anchored)
+        skip_candidate = self._probe_suggests_skip(facts)
+        if self.config.verbose:
+            logger.info(
+                "  [probe] filters=%d facts=%d anchored=%s pool=%d skip=%s%s",
+                len(facts), len([f for f in facts if f.exists]),
+                anchored or "-", len(pool_names), skip_candidate,
+                f" -> {rendered.replace(chr(10), ' | ')}" if rendered else "",
+            )
+        return rendered, skip_candidate
+
+    def _probe_suggests_skip(self, facts: list[ProbeResult]) -> bool:
+        """True when the current PRIMARY provably lacks the filter value while
+        the same value EXISTS in another pool table — a verified 'wrong table'
+        signal, not a wrong literal (which stays retryable)."""
+        scope = getattr(self, "_attempt_scope", None)
+        if not scope or not scope.primary_tables:
+            return False
+        primary = {DataProbe._norm(t) for t in scope.primary_tables}
+        exists_vals = {(f.column, f.value) for f in facts if f.exists}
+        for f in facts:
+            if (
+                not f.exists
+                and DataProbe._norm(f.table) in primary
+                and (f.column, f.value) in exists_vals
+            ):
+                return True
+        return False
 
     def _check_result_quality(self, data: pd.DataFrame) -> str | None:
         if data.empty:

@@ -11,6 +11,14 @@ from syrch.core.models import FinalSolution, JoinKey, NodeResult, NodeStatus, Ta
 from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 
+_AGG_RE = re.compile(r"\b(SUM|AVG|AVERAGE|COUNT|MIN|MAX)\s*\(\s*(?:DISTINCT\s+)?([^)]*)\)", re.IGNORECASE)
+_FROM_RE = re.compile(r"\bFROM\s+([\w\.]+)(?:\s+(?:AS\s+)?([\w]+))?", re.IGNORECASE)
+_JOIN_RE = re.compile(r"\bJOIN\s+([\w\.]+)", re.IGNORECASE)
+_JOIN_ON_RE = re.compile(r"\bJOIN\s+[\w\.]+\s+(?:\w+\s+)?ON\s+(.+?)(?=\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)", re.IGNORECASE | re.DOTALL)
+_WHERE_RE = re.compile(r"\bWHERE\s+(.+?)(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|;|$)", re.IGNORECASE | re.DOTALL)
+_GROUPBY_RE = re.compile(r"\bGROUP\s+BY\s+(.+?)(?=\bORDER\s+BY\b|\bHAVING\b|\bLIMIT\b|;|$)", re.IGNORECASE | re.DOTALL)
+_REFUND_RE = re.compile(r"\brefunded\b", re.IGNORECASE)
+
 DetectorFactory.seed = 0
 
 _LANG_MAP = {
@@ -164,7 +172,78 @@ class Aggregator:
             path_score=path_score,
             token_cost=total_tokens,
             tree=list(results.values()),
+            calculation_basis=self._build_calculation_basis(sql_lines, results),
         )
+
+    def _build_calculation_basis(
+        self, sql_lines: list[str], results: dict[str, NodeResult]
+    ) -> str:
+        """Explain *how* the final numbers were computed, derived from the
+        executed SQL alone (no LLM re-interpretation).
+
+        Domain-ambiguous questions (e.g. SCD "purchase-time" semantics) cannot
+        be resolved by the system; surfacing the exact join/filter/aggregate
+        lets the user detect that the interpretation differs from their intent
+        and re-ask.
+        """
+        node_desc: dict[str, str] = {
+            res.node_id: res.sql for res in results.values()
+        }
+        parts: list[str] = []
+        for sql in sql_lines:
+            if not sql:
+                continue
+            part = self._summarize_sql(sql, node_desc)
+            if part:
+                parts.append(part)
+        return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _short_table(name: str) -> str:
+        return name.split(".")[-1]
+
+    def _summarize_sql(self, sql: str, node_desc: dict[str, str]) -> str:
+        # Which node produced this SQL (context names map back to their task).
+        source = ""
+        for nid, nsql in node_desc.items():
+            if nsql == sql:
+                source = f" (task {nid})"
+                break
+        if not source:
+            ctx = re.search(r"_task_context_(\w+)", sql)
+            if ctx:
+                source = f" (JOINs task {ctx.group(1)} context)"
+
+        aggs = _AGG_RE.findall(sql)
+        agg_str = ", ".join(
+            f"{a.upper()}({c.strip()})" for a, c in aggs
+        ) if aggs else "raw row selection (no aggregate)"
+
+        tables: list[str] = []
+        for m in _FROM_RE.finditer(sql):
+            tables.append(self._short_table(m.group(1)))
+        for j in _JOIN_RE.finditer(sql):
+            tbl = self._short_table(j.group(1))
+            if tbl not in tables:
+                tables.append(tbl)
+
+        filters: list[str] = []
+        for m in _WHERE_RE.finditer(sql):
+            cond = m.group(1).strip()
+            if cond:
+                filters.append(" ".join(cond.split()))
+        for m in _JOIN_ON_RE.finditer(sql):
+            cond = m.group(1).strip()
+            if cond:
+                filters.append(" ".join(cond.split()))
+
+        lines = [f"[{len(tables) and ' + '.join(tables) or '?'}]" + source]
+        if aggs:
+            lines.append(f"  aggregate: {agg_str}")
+        if filters:
+            lines.append(f"  filters: {' AND '.join(filters)}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _pick_primary(leaf_results: list[NodeResult]) -> NodeResult | None:

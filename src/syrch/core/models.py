@@ -518,3 +518,4 @@ class FinalSolution:
     tree: list[NodeResult] = field(default_factory=list)
     clarified: bool = False
     clarification_qa: list[tuple[str, str]] = field(default_factory=list)
+    calculation_basis: str = ""

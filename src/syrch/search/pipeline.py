@@ -13,6 +13,7 @@ from syrch.search.question_norm import normalize_question
 from syrch.search.retriever import Retriever, ScoredSchemaEvidence
 from syrch.search.scheduler import Scheduler
 from syrch.search.semantic_index import SemanticIndex
+from syrch.search.data_probe import ProbeRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,8 @@ def run_pipeline(
 
     compress_node_schemas(dag, all_schemas_list)
 
+    probe_registry = ProbeRegistry()
+
     def _on_replan(current_dag: TaskDAG, failed_node_id: str, node_result: NodeResult) -> TaskDAG:
         new_dag = planner.replan(
             dag=current_dag,
@@ -213,6 +216,7 @@ def run_pipeline(
             error=node_result.error or "",
             node_result=node_result,
             scored_schemas=evidence.candidates if evidence.candidates else [],
+            probe_registry=probe_registry,
         )
         compress_node_schemas(new_dag, all_schemas_list)
         return new_dag
@@ -225,6 +229,7 @@ def run_pipeline(
         all_schemas=all_schemas_list,
         alias_map=evidence.alias_map if problem.evidence else None,
         candidate_pool=evidence.candidates if evidence.candidates else None,
+        probe_registry=probe_registry,
     )
     results = scheduler.run(dag)
     aggregator = Aggregator(llm, executor, config)

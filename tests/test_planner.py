@@ -519,6 +519,110 @@ def test_replan_merges_instead_of_replacing_hint_tables():
     assert "mart_sales_daily" in hints
 
 
+def test_replan_drops_infeasible_supporting_relation_from_probe():
+    """A supporting relation whose filter value the probe verified does not
+    exist is dropped on replan, so the node stops demanding an impossible JOIN."""
+    from syrch.core.models import (
+        NodeResult, NodeStatus, RequirementSpec, ScoredTable,
+        SupportingRelation, TableSchema, TaskDAG, TaskNode,
+    )
+    from syrch.search.data_probe import ProbeRegistry, ProbeResult
+    from syrch.search.planner import Planner
+
+    llm = FakeLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    planner = Planner(llm, config, retriever=None)
+
+    node = TaskNode(
+        id="C",
+        description="VIP net revenue",
+        depends_on=["A"],
+        is_atomic=True,
+        hint_tables=["dw_sales_order"],
+        requirements=RequirementSpec(
+            metrics=["revenue"],
+            aggregation="sum",
+            supporting_relations=[
+                SupportingRelation(
+                    table="rpt_customer_ltv",
+                    purpose="to filter for VIP customers",
+                ),
+                SupportingRelation(
+                    table="dim_date",
+                    purpose="filter to 2024",
+                ),
+            ],
+        ),
+    )
+    dag = TaskDAG(nodes={"C": node}, root_id="C", topo_layers=[["C"]])
+
+    registry = ProbeRegistry()
+    registry.put(
+        "db1",
+        ProbeResult(
+            table="rpt_customer_ltv",
+            column="segment",
+            value="VIP",
+            exists=False,
+            count=0,
+        ),
+    )
+    node_result = NodeResult(
+        node_id="C",
+        data=None,
+        sql="",
+        confidence=0.0,
+        status=NodeStatus.FAILED,
+        error="requirement infeasible",
+    )
+
+    new_dag = planner.replan(dag, "C", "", "infeasible", node_result, [], probe_registry=registry)
+
+    kept = new_dag.nodes["C"].requirements.supporting_relations
+    tables = [sr.table for sr in kept]
+    assert "rpt_customer_ltv" not in tables
+    assert "dim_date" in tables
+
+
+def test_replan_keeps_relations_when_no_probe_fact():
+    """Without a probe fact, supporting relations survive replan unchanged."""
+    from syrch.core.models import (
+        NodeResult, NodeStatus, RequirementSpec, ScoredTable,
+        SupportingRelation, TableSchema, TaskDAG, TaskNode,
+    )
+    from syrch.search.data_probe import ProbeRegistry
+    from syrch.search.planner import Planner
+
+    llm = FakeLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    planner = Planner(llm, config, retriever=None)
+
+    node = TaskNode(
+        id="C",
+        description="VIP net revenue",
+        depends_on=["A"],
+        is_atomic=True,
+        hint_tables=["dw_sales_order"],
+        requirements=RequirementSpec(
+            metrics=["revenue"],
+            aggregation="sum",
+            supporting_relations=[
+                SupportingRelation(table="rpt_customer_ltv", purpose="to filter for VIP customers"),
+            ],
+        ),
+    )
+    dag = TaskDAG(nodes={"C": node}, root_id="C", topo_layers=[["C"]])
+
+    node_result = NodeResult(
+        node_id="C", data=None, sql="", confidence=0.0, status=NodeStatus.FAILED,
+        error="requirement infeasible",
+    )
+    new_dag = planner.replan(dag, "C", "", "infeasible", node_result, [], probe_registry=ProbeRegistry())
+
+    kept = new_dag.nodes["C"].requirements.supporting_relations
+    assert [sr.table for sr in kept] == ["rpt_customer_ltv"]
+
+
 def test_is_supporting_relation_task():
     """S15: a dim/lookup node with no answer evidence is a supporting-relation
     task; an answer node or a mixed-hint node is not."""

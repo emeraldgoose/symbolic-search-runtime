@@ -368,6 +368,9 @@ def _show_solution(solution: FinalSolution) -> None:
     console.print()
     console.print(f"[dim]Confidence: {solution.confidence:.2f} | "
                   f"Token cost: {solution.token_cost}[/dim]")
+    if solution.calculation_basis:
+        console.print("[bold]Calculation basis:[/bold]")
+        console.print(f"[dim]{solution.calculation_basis}[/dim]")
     if solution.sql:
         console.print("[bold]SQL:[/bold]")
         console.print(f"[dim]{solution.sql}[/dim]")

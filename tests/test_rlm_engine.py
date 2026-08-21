@@ -267,6 +267,331 @@ def test_rlm_agent_empty_result_feedback_reaches_llm():
     assert result.confidence == pytest.approx(0.9, rel=1e-2)
 
 
+def test_probe_empty_feedback_skips_candidate_with_verified_negative():
+    """EMPTY result on a PRIMARY that provably lacks the filter value (while the
+    same value EXISTS in another pool table) SKIPS the candidate instead of
+    retrying — the NOT FOUND is verified data evidence, so 3 blind retries on
+    the same wrong table are wasted."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ScoredTable
+
+    class ProbeLLM:
+        def __init__(self):
+            self.count = 0
+            self.prompts: list[str] = []
+
+        def generate(self, system: str, user: str, **kwargs):
+            self.count += 1
+            self.prompts.append(user)
+            content = "```sql\nSELECT segment FROM rpt_customer_ltv WHERE segment = 'VIP'\n```\nconfidence: 0.7"
+            return type("Response", (), {"content": content, "model": "test", "usage": {"completion_tokens": 10}})()
+
+        def generate_json(self, *a, **kw):
+            return {}
+
+    class DecoyExecutor(EmptyResultExecutor):
+        def __init__(self):
+            self.probes: list[str] = []
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.probes.append(sql)
+            if sql.strip().upper().startswith("SELECT COUNT"):
+                if "dw_customer" in sql:
+                    return pd.DataFrame({"n": [486]})
+                return pd.DataFrame({"n": [0]})
+            return pd.DataFrame()
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+        candidate_budget=1,
+    )
+    llm = ProbeLLM()
+    executor = DecoyExecutor()
+    agent = RLMAgent(llm, executor, config)
+    from syrch.core.models import ColumnSchema, TableSchema
+    pool = [
+        ScoredTable(schema=TableSchema(name="rpt_customer_ltv", columns=[ColumnSchema(name="segment", type="TEXT")]), score=1.0),
+        ScoredTable(schema=TableSchema(name="dw_customer", columns=[ColumnSchema(name="segment", type="TEXT")]), score=1.0),
+    ]
+    agent.set_candidate_pool(pool)
+    agent.all_schemas = [p.schema for p in pool]
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    agent.solve(node)
+
+    # The candidate (rpt_customer_ltv) is skipped after ONE attempt instead of
+    # 3 blind retries, because the probe verified VIP does not exist there.
+    assert llm.count == 1
+    # The probe ran a COUNT existence check against dw_customer.
+    assert any("SELECT COUNT(*)" in p and "dw_customer" in p for p in executor.probes)
+    # No retry prompt was produced for the skipped candidate.
+    assert len(llm.prompts) == 1
+
+
+def test_probe_empty_feedback_injects_verified_facts_when_value_in_primary():
+    """When the PRIMARY itself holds the value (verified EXISTS), EMPTY result
+    injects VERIFIED DATA FACTS into the retry prompt instead of skipping — the
+    candidate is still viable, only the SQL is wrong."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ScoredTable
+
+    class ProbeLLM:
+        def __init__(self):
+            self.count = 0
+            self.prompts: list[str] = []
+
+        def generate(self, system: str, user: str, **kwargs):
+            self.count += 1
+            self.prompts.append(user)
+            content = "```sql\nSELECT segment FROM dw_customer WHERE segment = 'VIP'\n```\nconfidence: 0.7"
+            return type("Response", (), {"content": content, "model": "test", "usage": {"completion_tokens": 10}})()
+
+        def generate_json(self, *a, **kw):
+            return {}
+
+    class ViableExecutor(EmptyResultExecutor):
+        def __init__(self):
+            self.probes: list[str] = []
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.probes.append(sql)
+            if sql.strip().upper().startswith("SELECT COUNT"):
+                if "dw_customer" in sql:
+                    return pd.DataFrame({"n": [486]})
+                return pd.DataFrame({"n": [0]})
+            return pd.DataFrame()
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+        candidate_budget=1,
+    )
+    llm = ProbeLLM()
+    executor = ViableExecutor()
+    agent = RLMAgent(llm, executor, config)
+    from syrch.core.models import ColumnSchema, TableSchema
+    pool = [
+        ScoredTable(schema=TableSchema(name="dw_customer", columns=[ColumnSchema(name="segment", type="TEXT")]), score=1.0),
+    ]
+    agent.set_candidate_pool(pool)
+    agent.all_schemas = [p.schema for p in pool]
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    agent.solve(node)
+
+    # dw_customer holds VIP (EXISTS), so no skip — the model retries with facts.
+    assert llm.count == 3
+    # The verified fact reached the model's next-attempt prompt.
+    assert any("VERIFIED DATA FACTS" in p for p in llm.prompts[1:])
+    joined = "\n".join(llm.prompts)
+    assert "EXISTS in dw_customer.segment" in joined
+    assert "NOT FOUND in" not in joined
+
+
+def test_probe_schema_fail_drift_injects_verified_facts():
+    """SCHEMA FAIL due to FROM drift also probes the failing filter literal and
+    injects VERIFIED DATA FACTS, so the model can re-anchor on the table that
+    actually holds the data (Databricks S-log signature: model anchors FROM on
+    rpt_customer_ltv while candidate is dw_customer)."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ColumnSchema, ScoredTable, TableSchema
+
+    class DriftLLM:
+        def __init__(self):
+            self.count = 0
+            self.prompts: list[str] = []
+
+        def generate(self, system: str, user: str, **kwargs):
+            self.count += 1
+            self.prompts.append(user)
+            content = "```sql\nSELECT customer_id FROM rpt_customer_ltv WHERE segment = 'VIP'\n```\nconfidence: 0.7"
+            return type("Response", (), {"content": content, "model": "test", "usage": {"completion_tokens": 10}})()
+
+        def generate_json(self, *a, **kw):
+            return {}
+
+    class DriftExecutor(EmptyResultExecutor):
+        def __init__(self):
+            self.probes: list[str] = []
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.probes.append(sql)
+            if sql.strip().upper().startswith("SELECT COUNT"):
+                if "dw_customer" in sql:
+                    return pd.DataFrame({"n": [486]})
+                return pd.DataFrame({"n": [0]})
+            return pd.DataFrame()
+
+    config = ExecutionConfig(
+        question="test", db_path=":memory:",
+        max_attempts_per_node=3,
+        candidate_budget=1,
+    )
+    llm = DriftLLM()
+    executor = DriftExecutor()
+    agent = RLMAgent(llm, executor, config)
+    pool = [
+        ScoredTable(schema=TableSchema(name="dw_customer", columns=[ColumnSchema(name="segment", type="TEXT")]), score=1.0),
+        ScoredTable(schema=TableSchema(name="rpt_customer_ltv", columns=[ColumnSchema(name="segment", type="TEXT")]), score=1.0),
+    ]
+    agent.set_candidate_pool(pool)
+    agent.all_schemas = [p.schema for p in pool]
+
+    node = TaskNode(id="A", description="test task", is_atomic=True)
+    agent.solve(node)
+
+    assert llm.count == 3
+    # probe checked dw_customer
+    assert any("SELECT COUNT(*)" in p and "dw_customer" in p for p in executor.probes)
+    # VERIFIED DATA FACTS reached a retry prompt even though every attempt was SCHEMA FAIL
+    assert any("VERIFIED DATA FACTS" in p for p in llm.prompts[1:])
+
+
+def test_probe_registry_shared_across_agents():
+    """A ProbeRegistry shared across agents returns the same cached fact, so a
+    probe runs once per run (not once per node)."""
+    from syrch.search.data_probe import DataProbe, ProbeRegistry
+
+    class CountingExecutor(EmptyResultExecutor):
+        def __init__(self):
+            self.count = 0
+
+        def execute(self, sql: str) -> pd.DataFrame:
+            self.count += 1
+            return pd.DataFrame({"n": [10]})
+
+    ex = CountingExecutor()
+    registry = ProbeRegistry()
+    p1 = DataProbe(ex, registry)
+    p2 = DataProbe(ex, registry)
+
+    f1 = p1.probe("dw_customer", "segment", "VIP")
+    f2 = p2.probe("dw_customer", "segment", "VIP")
+
+    assert f1.exists and f1.count == 10
+    assert f1 is f2
+    assert ex.count == 1
+
+
+def test_requirement_infeasible_when_probe_verifies_missing_filter_value():
+    """Node-start feasibility gate: a supporting relation whose filter value
+    the shared probe registry verified NOT FOUND is unsatisfiable, and solve()
+    surfaces a STRUCTURAL replan instead of burning SQL attempts on it."""
+    from syrch.core.models import (
+        RequirementSpec, SupportingRelation, NodeStatus,
+    )
+    from syrch.search.data_probe import ProbeRegistry, ProbeResult
+    from syrch.search.rlm_engine import RLMAgent
+
+    registry = ProbeRegistry()
+    registry.put(
+        "FakeExecutor",
+        ProbeResult(
+            table="rpt_customer_ltv",
+            column="segment",
+            value="VIP",
+            exists=False,
+            count=0,
+        ),
+    )
+    config = ExecutionConfig(
+        question="VIP net revenue",
+        db_path=":memory:",
+        max_attempts_per_node=3,
+        verbose=False,
+    )
+    agent = RLMAgent(FakeLLM(), FakeExecutor(), config, probe_registry=registry)
+    node = TaskNode(
+        id="C",
+        description="VIP net revenue",
+        depends_on=["A"],
+        is_atomic=True,
+        hint_tables=["dw_sales_order"],
+        requirements=RequirementSpec(
+            metrics=["revenue"],
+            aggregation="sum",
+            supporting_relations=[
+                SupportingRelation(table="rpt_customer_ltv", purpose="to filter for VIP customers"),
+            ],
+        ),
+    )
+
+    reason = agent._requirement_infeasible(node)
+    assert reason is not None
+    assert "rpt_customer_ltv" in reason
+
+    result = agent.solve(node)
+
+    assert result.status == NodeStatus.FAILED
+    assert result.replan_request is not None
+    from syrch.core.models import ReplanType
+    assert result.replan_request[0] == ReplanType.STRUCTURAL
+    assert "rpt_customer_ltv" in result.replan_request[1]
+    assert result.cost_tokens == 0
+
+
+def test_requirement_feasible_when_probe_has_positive_fact():
+    """A positive probe fact (value EXISTS) does not trigger the infeasibility
+    gate — the supporting relation remains satisfiable."""
+    from syrch.core.models import (
+        RequirementSpec, SupportingRelation, NodeStatus,
+    )
+    from syrch.search.data_probe import ProbeRegistry, ProbeResult
+    from syrch.search.rlm_engine import RLMAgent
+
+    class SolutionLLM(FakeLLM):
+        def generate(self, system: str, user: str, **kwargs):
+            self.call_count += 1
+            return type("Response", (), {
+                "content": "```sql\nSELECT SUM(x) AS revenue FROM test "
+                           "JOIN rpt_customer_ltv ON test.x = rpt_customer_ltv.x\n"
+                           "```\nconfidence: 0.9",
+                "model": "test",
+                "usage": {"completion_tokens": 5},
+            })()
+
+    registry = ProbeRegistry()
+    registry.put(
+        "FakeExecutor",
+        ProbeResult(
+            table="rpt_customer_ltv",
+            column="segment",
+            value="VIP",
+            exists=True,
+            count=486,
+        ),
+    )
+    config = ExecutionConfig(
+        question="VIP net revenue",
+        db_path=":memory:",
+        max_attempts_per_node=2,
+        verbose=False,
+    )
+    agent = RLMAgent(SolutionLLM(), FakeExecutor(), config, probe_registry=registry)
+    node = TaskNode(
+        id="C",
+        description="VIP net revenue",
+        depends_on=["A"],
+        is_atomic=True,
+        hint_tables=["test"],
+        requirements=RequirementSpec(
+            metrics=["revenue"],
+            aggregation="sum",
+            supporting_relations=[
+                SupportingRelation(table="rpt_customer_ltv", purpose="to filter for VIP customers"),
+            ],
+        ),
+    )
+
+    assert agent._requirement_infeasible(node) is None
+
+    result = agent.solve(node)
+
+    assert result.status == NodeStatus.SOLVED
+    assert result.replan_request is None
+
+
 def test_validate_sql_direct():
     from syrch.search.rlm_engine import RLMAgent
 
@@ -1178,6 +1503,56 @@ def test_s5_drift_guard_preserved_under_scope():
     assert err is not None and "outside the allowed search scope" in err
 
 
+def test_qualified_column_must_exist_on_that_table():
+    """A qualified reference `alias.col` must resolve against the columns of
+    THAT table, not the global union of all schemas. Previously a column that
+    existed only on `dw_customer` (e.g. customer_id) let
+    `mart_sales_daily.customer_id` pass schema validation and fail only at
+    execution with UNRESOLVED_COLUMN."""
+    from syrch.search.rlm_engine import RLMAgent
+    from syrch.core.models import ColumnSchema, ScoredTable, TableSchema, TaskNode
+
+    schemas = [
+        TableSchema(name="mart_sales_daily", columns=[ColumnSchema(name="sale_date", type="DATE")]),
+        TableSchema(name="dw_customer", columns=[ColumnSchema(name="customer_id", type="INTEGER")]),
+    ]
+    agent = RLMAgent.__new__(RLMAgent)
+    agent.all_schemas = schemas
+    agent._compressed_schemas = None
+
+    class Executor:
+        def list_tables(self):
+            return ["mart_sales_daily", "dw_customer"]
+        def get_schema(self, table_name=None):
+            return schemas[0] if table_name == "mart_sales_daily" else schemas[1]
+    agent.executor = Executor()
+
+    pool = [ScoredTable(schema=s, score=1.0) for s in schemas]
+    agent._candidate_pool = pool
+
+    node = TaskNode(id="A", description="daily sales", is_atomic=True)
+    node.hint_tables = ["dw_customer"]  # make dw_customer join-available
+    scope = agent._build_attempt_schemas(node, pool[0])
+    agent._attempt_scope = scope
+    agent._allowed_tables = scope.allowed_tables
+    assert "dw_customer" in scope.join_available_tables
+
+    # customer_id exists in the schema (dw_customer) but NOT on mart_sales_daily
+    sql = (
+        "SELECT m.customer_id FROM mart_sales_daily m "
+        "JOIN dw_customer c ON m.customer_id = c.customer_id"
+    )
+    err = agent._validate_schema(sql)
+    assert err is not None, "qualified column missing from its table must fail"
+    assert "m.customer_id" in err
+    assert "mart_sales_daily" in err
+    assert "sale_date" in err  # actionable: lists the table's real columns
+
+    # a qualified column that DOES exist on the table passes
+    ok_sql = "SELECT m.sale_date FROM mart_sales_daily m"
+    assert agent._validate_schema(ok_sql) is None
+
+
 def test_join_available_table_in_from_is_primary_switch():
     """S3 invariant: a JOIN-AVAILABLE table used as the FROM anchor is a
     'primary switch' — rejected even though the table is within allowed_tables."""
@@ -1305,7 +1680,13 @@ def test_task_context_in_join_is_allowed_when_materialized():
     )
 
     schemas = [
-        TableSchema(name="dw_sales_order", columns=[ColumnSchema(name="total_amount", type="REAL")]),
+        TableSchema(
+            name="dw_sales_order",
+            columns=[
+                ColumnSchema(name="order_id", type="INTEGER"),
+                ColumnSchema(name="total_amount", type="REAL"),
+            ],
+        ),
     ]
     agent = RLMAgent.__new__(RLMAgent)
     agent.all_schemas = schemas

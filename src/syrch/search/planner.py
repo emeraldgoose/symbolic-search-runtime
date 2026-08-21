@@ -633,12 +633,15 @@ class Planner:
         error: str,
         node_result: NodeResult,
         scored_schemas: list,
+        probe_registry=None,
     ) -> TaskDAG:
         if self.config.verbose:
             logger.info("Planner.replan (STRUCTURAL): node=%s error=%s", failed_node_id, error[:100])
         failed_node = dag.nodes.get(failed_node_id)
         if failed_node is None:
             return dag
+
+        self._drop_infeasible_supporting_relations(failed_node, probe_registry)
 
         tried = self._collect_tried_tables(failed_node, node_result)
         alternatives = self._suggest_alternative_tables(failed_node, tried, scored_schemas)
@@ -659,6 +662,47 @@ class Planner:
         failed_node.selection_reason = None
         failed_node._compressed_schemas = None
         return dag
+
+    def _drop_infeasible_supporting_relations(self, node: TaskNode, probe_registry) -> bool:
+        """Remove supporting relations whose filter value the probe registry
+        already verified does not exist in the table.
+
+        The planner picks supporting relations from schema alone, so it can
+        demand a decoy table (e.g. rpt_customer_ltv for 'filter for VIP
+        customers') that the probe found to be empty of that value. Such a
+        relation can never be satisfied — dropping it lets the node run against
+        real candidate tables instead of retrying an impossible JOIN. Returns
+        True when at least one relation was removed."""
+        if probe_registry is None or node.requirements is None:
+            return False
+        facts = probe_registry.all()
+        if not facts:
+            return False
+        kept = []
+        removed: list[str] = []
+        for sr in node.requirements.supporting_relations:
+            base = sr.table.split(".")[-1].lower()
+            purpose = (sr.purpose or "").lower()
+            infeasible = False
+            if purpose:
+                for fact in facts:
+                    if fact.exists:
+                        continue
+                    if fact.table.split(".")[-1].lower() != base:
+                        continue
+                    if fact.value.lower() in purpose:
+                        infeasible = True
+                        break
+            if infeasible:
+                removed.append(sr.table)
+            else:
+                kept.append(sr)
+        if removed:
+            if self.config.verbose:
+                logger.info("  dropping infeasible supporting_relations: %s", removed)
+            node.requirements.supporting_relations = kept
+            return True
+        return False
 
     def _collect_tried_tables(
         self,

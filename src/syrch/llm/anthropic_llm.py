@@ -17,7 +17,7 @@ class AnthropicLLM(BaseLLM):
         self.client = Anthropic(api_key=api_key or os.getenv("ANTHROPIC_API_KEY"))
 
     def generate(self, system: str, user: str, **kwargs) -> LLMResponse:
-        response = self.client.messages.create(
+        response = self.client.messages.create(  # type: ignore[call-overload]
             model=kwargs.get("model", self.model),
             system=system,
             max_tokens=kwargs.get("max_tokens", 4096),
@@ -35,7 +35,7 @@ class AnthropicLLM(BaseLLM):
         )
 
     def generate_json(self, system: str, user: str, **kwargs) -> dict:
-        response = self.client.messages.create(
+        response = self.client.messages.create(  # type: ignore[call-overload]
             model=kwargs.get("model", self.model),
             system=f"{system}\nRespond with a valid JSON object only.",
             max_tokens=kwargs.get("max_tokens", 4096),
