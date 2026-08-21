@@ -163,6 +163,9 @@ class Aggregator:
         )
         path_score = cand_ps if cand_ps >= 0 else adjusted_conf
 
+        self._last_question = question
+        self._last_dag: TaskDAG | None = dag
+
         return FinalSolution(
             question=question,
             answer=response.content,
@@ -178,47 +181,90 @@ class Aggregator:
     def _build_calculation_basis(
         self, sql_lines: list[str], results: dict[str, NodeResult]
     ) -> str:
-        """Explain *how* the final numbers were computed, derived from the
-        executed SQL alone (no LLM re-interpretation).
+        """Step-by-step explanation of how the final numbers were computed.
 
-        Domain-ambiguous questions (e.g. SCD "purchase-time" semantics) cannot
-        be resolved by the system; surfacing the exact join/filter/aggregate
-        lets the user detect that the interpretation differs from their intent
-        and re-ask.
+        Derived from executed SQL + row counts only (no LLM re-interpretation).
+        Each step names the table, filter criteria and how the result was
+        aggregated, so the user can verify the calculation from observable
+        facts alone.
         """
-        node_desc: dict[str, str] = {
-            res.node_id: res.sql for res in results.values()
-        }
-        parts: list[str] = []
-        for sql in sql_lines:
-            if not sql:
-                continue
-            part = self._summarize_sql(sql, node_desc)
-            if part:
-                parts.append(part)
-        return "\n\n".join(parts) if parts else ""
+        return self._build_step_explanation(sql_lines, results)
 
-    @staticmethod
-    def _short_table(name: str) -> str:
-        return name.split(".")[-1]
+    def _build_step_explanation(
+        self, sql_lines: list[str], results: dict[str, NodeResult]
+    ) -> str:
+        dag = getattr(self, '_last_dag', None)
 
-    def _summarize_sql(self, sql: str, node_desc: dict[str, str]) -> str:
-        # Which node produced this SQL (context names map back to their task).
-        source = ""
-        for nid, nsql in node_desc.items():
-            if nsql == sql:
-                source = f" (task {nid})"
-                break
-        if not source:
-            ctx = re.search(r"_task_context_(\w+)", sql)
-            if ctx:
-                source = f" (JOINs task {ctx.group(1)} context)"
+        # Walk DAG layers in execution order when available; fall back to
+        # sql_lines order for callers that don't provide a DAG.
+        ordered_ids: list[str] = []
+        if dag is not None and hasattr(dag, 'topo_layers'):
+            for layer in dag.topo_layers:
+                ordered_ids.extend(layer)
 
+        # Map node_id -> NodeResult for row-count lookup
+        by_id: dict[str, NodeResult] = {r.node_id: r for r in results.values()}
+        # Map sql -> node_id for reverse lookup
+        sql_to_id: dict[str, str] = {r.sql: r.node_id for r in results.values() if r.sql}
+
+        steps: list[str] = []
+
+        if ordered_ids:
+            step_no = 0
+            for nid in ordered_ids:
+                res = by_id.get(nid)
+                if res is None or not res.sql:
+                    continue
+                step_no += 1
+                text = self._render_step(step_no, nid, res, by_id)
+                if text:
+                    steps.append(text)
+            # Any results not in DAG order (orphan nodes)
+            for sql in sql_lines:
+                orphan_nid: str | None = sql_to_id.get(sql)
+                if orphan_nid is None or orphan_nid in ordered_ids:
+                    continue
+                res = by_id.get(orphan_nid)
+                if res is None:
+                    continue
+                step_no += 1
+                text = self._render_step(step_no, orphan_nid, res, by_id)
+                if text:
+                    steps.append(text)
+        else:
+            for idx, sql in enumerate(sql_lines):
+                if not sql:
+                    continue
+                nid = sql_to_id.get(sql, f"step{idx + 1}")
+                res = results.get(nid) if nid in results else None
+                # Find any result whose sql matches
+                if res is None:
+                    for r in results.values():
+                        if r.sql == sql:
+                            res = r
+                            nid = r.node_id
+                            break
+                if res is not None:
+                    text = self._render_step(idx + 1, nid, res, by_id)
+                else:
+                    text = self._summarize_sql_fallback(sql, sql_to_id)
+                if text:
+                    steps.append(text)
+
+        return "\n\n".join(s for s in steps if s)
+
+    def _render_step(
+        self,
+        step_no: int,
+        node_id: str,
+        res: NodeResult,
+        by_id: dict[str, NodeResult],
+    ) -> str:
+        sql = res.sql
+        row_count = len(res.data) if res.data is not None and not res.data.empty else 0
+
+        # --- Parse structural info from SQL ---
         aggs = _AGG_RE.findall(sql)
-        agg_str = ", ".join(
-            f"{a.upper()}({c.strip()})" for a, c in aggs
-        ) if aggs else "raw row selection (no aggregate)"
-
         tables: list[str] = []
         for m in _FROM_RE.finditer(sql):
             tables.append(self._short_table(m.group(1)))
@@ -227,6 +273,98 @@ class Aggregator:
             if tbl not in tables:
                 tables.append(tbl)
 
+        # Separate validity-window condition from other filters
+        where_conds: list[str] = []
+        for m in _WHERE_RE.finditer(sql):
+            cond = m.group(1).strip()
+            if cond:
+                where_conds.append(" ".join(cond.split()))
+
+        join_conds: list[str] = []
+        for m in _JOIN_ON_RE.finditer(sql):
+            cond = m.group(1).strip()
+            if cond:
+                join_conds.append(" ".join(cond.split()))
+
+        # --- Build description ---
+        # Check if this step's source is a task context (dependent)
+        depends_label = ""
+        for jc in join_conds:
+            ctx_m = re.search(r'_task_context_(\w+)', jc)
+            if ctx_m:
+                dep_id = ctx_m.group(1)
+                dep_res = by_id.get(dep_id)
+                dep_rows = len(dep_res.data) if dep_res and dep_res.data is not None and not dep_res.data.empty else 0
+                if dep_rows:
+                    depends_label = f" (joined with {dep_rows:,} rows from step {dep_id})"
+                else:
+                    depends_label = f" (joined with result of step {dep_id})"
+                break
+        if not depends_label:
+            for tbl in tables:
+                if tbl.startswith("_task_context_"):
+                    dep_id = tbl.replace("_task_context_", "")
+                    dep_res = by_id.get(dep_id)
+                    dep_rows = len(dep_res.data) if dep_res and dep_res.data is not None and not dep_res.data.empty else 0
+                    if dep_rows:
+                        depends_label = f" (joined with {dep_rows:,} rows from step {dep_id})"
+                    break
+
+        # Physical tables (exclude _task_context_*)
+        phys_tables = [t for t in tables if not t.startswith("_task_context_")]
+        table_label = " + ".join(phys_tables) if phys_tables else (tables[0] if tables else "?")
+
+        lines: list[str] = []
+        lines.append(f"Step {step_no} — {table_label}{depends_label}")
+
+        if where_conds:
+            lines.append(f"  filter: {' AND '.join(where_conds)}")
+
+        if join_conds:
+            lines.append(f"  join: {' AND '.join(join_conds)}")
+
+        if aggs:
+            agg_str = ", ".join(f"{a.upper()}({c.strip()})" for a, c in aggs)
+            if aggs and row_count == 1 and res.data is not None:
+                try:
+                    val = res.data.iloc[0].iloc[0]
+                    if isinstance(val, float):
+                        lines.append(f"  aggregate: {agg_str} → {val:,.2f} ({row_count} row)")
+                    else:
+                        lines.append(f"  aggregate: {agg_str} → {val} ({row_count} row)")
+                except Exception:
+                    lines.append(f"  aggregate: {agg_str} ({row_count} row)")
+            elif row_count > 0:
+                lines.append(f"  aggregate: {agg_str} ({row_count:,} rows)")
+            else:
+                lines.append(f"  aggregate: {agg_str}")
+        elif row_count > 0:
+            lines.append(f"  result: {row_count:,} rows")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _short_table(name: str) -> str:
+        return name.split(".")[-1]
+
+    def _summarize_sql_fallback(self, sql: str, sql_to_id: dict[str, str]) -> str:
+        """Fallback for SQL not linked to a NodeResult."""
+        source = ""
+        nid = sql_to_id.get(sql)
+        if nid:
+            source = f" (task {nid})"
+        else:
+            ctx = re.search(r"_task_context_(\w+)", sql)
+            if ctx:
+                source = f" (JOINs task {ctx.group(1)} context)"
+        aggs = _AGG_RE.findall(sql)
+        tables: list[str] = []
+        for m in _FROM_RE.finditer(sql):
+            tables.append(self._short_table(m.group(1)))
+        for j in _JOIN_RE.finditer(sql):
+            tbl = self._short_table(j.group(1))
+            if tbl not in tables:
+                tables.append(tbl)
         filters: list[str] = []
         for m in _WHERE_RE.finditer(sql):
             cond = m.group(1).strip()
@@ -236,14 +374,15 @@ class Aggregator:
             cond = m.group(1).strip()
             if cond:
                 filters.append(" ".join(cond.split()))
-
         lines = [f"[{len(tables) and ' + '.join(tables) or '?'}]" + source]
         if aggs:
+            agg_str = ", ".join(f"{a.upper()}({c.strip()})" for a, c in aggs)
             lines.append(f"  aggregate: {agg_str}")
         if filters:
             lines.append(f"  filters: {' AND '.join(filters)}")
-
         return "\n".join(lines)
+
+    _summarize_sql = _summarize_sql_fallback  # compat alias (tests call the old name)
 
     @staticmethod
     def _pick_primary(leaf_results: list[NodeResult]) -> NodeResult | None:
