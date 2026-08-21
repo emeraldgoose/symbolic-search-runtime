@@ -17,7 +17,12 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **Grid Search**: Systematic hyperparameter testing (`max_depth`, `beam_width`, `max_attempts_per_node`, `calibration_enabled`) to find optimal configs.
 - **Multi-table Schema**: Retriever scores all tables by relevance, Planner selects per subtask, and RLM sees only the per-attempt scope (not all tables).
 - **Search over reasoning, not execution**: D&C splits the *problem space*, not the SQL. Each sub-problem is a complete reasoning unit (think → code → validate → execute → evaluate).
-- **Pluggable Executors**: Abstract `BaseExecutor` with SQLite, JDBC, Spark, and Databricks implementations — PEP 249 compatible.
+- **Pluggable Executors**: Abstract `BaseExecutor` with SQLite, JDBC, Spark, and Databricks implementations.
+  Any database that speaks a standard query interface can be plugged in.
+- **Step-by-step Evidence**: The final answer includes a trace that walks through the
+  task graph in execution order — which table was queried, what filter was applied,
+  how many rows were found, and how the result was aggregated — so the calculation
+  can be verified without trusting the language model.
 
 ## Architecture
 
@@ -60,10 +65,11 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
                      ▼
 ┌──────────────────────────────────────────┐
 │  Aggregator — "compose the answer"       │
-│  primary leaf, no re-ranking             │
+│  primary leaf, no re-ranking;            │
+│  builds step-by-step evidence chain      │
 └────────────────────┬─────────────────────┘
                      ▼
-        FINAL ANSWER + SQL + reasoning trace
+        FINAL ANSWER + SQL + step-by-step evidence + reasoning trace
 ```
 
 Node outcomes: `SOLVED` → a real `_task_context_<id>` table is materialized
@@ -134,12 +140,14 @@ syrch/
 │   │   ├── scheduler.py          # DAG execution + context materialization
 │   │   ├── rlm_engine.py         # RLM candidate search loop
 │   │   ├── search_policy.py      # Beam / exhaustive candidate policy
-│   │   ├── path_evaluator.py     # PathScore + discrimination signals
+│   │   ├── path_evaluator.py     # Quality scores + ranking signals
 │   │   ├── validator.py          # Hard constraint checks
 │   │   ├── retriever.py          # Keyword scoring + candidate pool
 │   │   ├── semantic_index.py     # Optional embedding-based semantic index
-│   │   ├── aggregator.py         # Result merge (no re-ranking)
-│   │   ├── calibrator.py         # ExecutionSignals (execution penalties)
+│   │   ├── data_probe.py         # Data-level fact verification (shared probe cache)
+│   │   ├── question_norm.py      # Non-English question normalization
+│   │   ├── aggregator.py         # Result merge + step-by-step evidence
+│   │   ├── calibrator.py         # Execution penalties
 │   │   ├── clarify.py            # Ambiguity detection + clarification
 │   │   ├── grid.py               # Grid search
 │   │   └── pipeline.py           # Orchestrator
@@ -180,28 +188,51 @@ TaskDAG { nodes: {A, B, C, ...}, root_id, topo_layers }
     ▼
 Scheduler → NodeResult { node_id, data(DataFrame), sql, confidence,
                          selected_candidate, reasoning_paths,
-                         cost_tokens, status(SOLVED/AMBIGUOUS/FAILED/BLOCKED) }
+                         cost_tokens, status(SOLVED/AMBIGUOUS/FAILED/BLOCKED),
+                         had_context, context_used }
     │
     ▼
-Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
-             (primary leaf = SOLVED with evidence; no re-ranking)
+Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree,
+                              calculation_basis }
+             (primary leaf = SOLVED with evidence; no re-ranking;
+              calculation_basis = step-by-step evidence chain)
 ```
+
+`calculation_basis` is a plain-text trace derived from the executed SQL and row counts
+(walking the DAG layer by layer), not from the language model. For example:
+
+```
+Step 1 — dw_customer
+  filter: segment = 'VIP' AND valid_from <= '2024-12-31' ...
+  result: 1,247 rows
+Step 2 — dw_sales_order (joined with 1,247 rows from step 1)
+  join: v.customer_id = dso.customer_id
+  filter: order_date BETWEEN '2024-01-01' AND '2024-12-31'
+  aggregate: SUM(total_amount) → 140,866.70 (1 row)
+```
+
+It lets users verify *how* a number was computed by showing the table, columns,
+filter criteria and aggregation at each step — with no assumption about table
+structure or SCD modeling.
 
 Node-level selection produces a `CandidateEvaluation` per explored candidate:
 
 ```
 CandidateEvaluation {
-    table, ok, execution_valid, requirement_pass,
+    table, ok, execution_valid, requirement_pass, has_data,
     semantic_match, result_quality,
     structural_match, grain_match, dimension_match, time_match,
-    cost_tokens, candidate_id, confidence, path_score
+    cost_tokens, candidate_id, confidence, error, attempts, path_score
 }
+viable = ok && has_data && execution_valid && requirement_pass
+ranking order: structural_match → grain_match → dimension_match →
+               time_match → result_quality → candidate_id
 ```
 
-Selection is lexicographic over the discrimination signals only:
-`structural_match → grain_match → dimension_match → time_match → result_quality → candidate_id`.
-A tie between the top two viable candidates on all signals ⇒ **AMBIGUOUS** —
-never resolved by execution order, retriever prior, or token cost.
+The first five signals are called *ranking signals* — they compare how well a
+candidate matches the task requirements. A tie between the top two viable
+candidates on all ranking signals ⇒ **AMBIGUOUS** — the system does not pick a
+winner based on run order, keyword overlap, or how cheap the query was.
 
 ## Installation
 
@@ -234,10 +265,14 @@ result = query(
     executor_type="databricks-sql",
     model="gpt-4o",
 )
-print(result.answer)
-print(result.sql)
-print(result.confidence)
-print(result.data)
+print(result.answer)              # Final answer text
+print(result.sql)                 # Executed SQL (all steps)
+print(result.confidence)          # Confidence score (0-1)
+print(result.data)                # Result DataFrame
+print(result.calculation_basis)   # Step-by-step evidence chain
+print(result.tables_used)         # Physical tables actually queried
+print(result.tree)                # Per-task results (NodeResult list)
+print(result.dag_nodes)           # Task graph structure
 ```
 
 ## CLI Usage
@@ -532,27 +567,28 @@ responsibility of the layers above or below it.**
 | Module | Core question | Input | Output |
 |--------|---------------|-------|--------|
 | Planner | What to solve? | Question + Schema | RequirementSpec + DAG |
-| Retriever | Where to look? | Requirement + Semantic Index | Candidate Pool |
-| SemanticIndex | What schema evidence exists? | DB metadata | semantic evidence |
-| TaskDAG | How to split work? | RequirementSpec | DAG |
-| Scheduler | In what order? | DAG | Node execution |
-| ParentContext | How to pass parent results? | NodeResult | Context metadata + data |
-| RLM | How to execute? | Node + Requirement + Scope | SQL candidates |
-| Validator | Is the SQL allowed? | SQL + Schema + Scope | Valid/Fail |
-| Executor | Run the SQL | Valid SQL | ExecutionResult |
-| Materializer | Make parent results reusable | ParentContext | `_task_context_X` |
-| Evaluator | Does the candidate meet the requirement? | Requirement + SQL + Result | CandidateEvaluation |
-| Selection | Which candidate is adopted? | CandidateEvaluations | Selected / AMBIGUOUS |
-| Replanner | Reconfigure the search? | Failure / Ambiguity | Expanded/merged candidates |
-| Aggregator | What is the final answer? | NodeResults | Final Answer |
+| Retriever | Where to look? | Requirement + Schema | Candidate Pool (ranked by relevance) |
+| SemanticIndex | What schema evidence exists? | DB metadata | Semantic hints for scoring |
+| DataProbe | Does this value actually exist in the database? | Candidate tables + filter values | Verified facts (shared across all tasks) |
+| Pipeline | How do all stages connect? | LLM + Executor + Config + Problem | FinalSolution + DAG + per-task results |
+| TaskDAG | How to split work? | RequirementSpec | DAG (layers of dependent tasks) |
+| Scheduler | In what order? | DAG + Executor | Node execution (parallel within each layer) |
+| RLM | How to execute? | Task + Candidate scope | SQL candidates (one attempt per candidate) |
+| Validator | Is the SQL allowed? | SQL + Schema + Scope | Pass/Fail |
+| Executor | Run the SQL | Valid SQL | Data (rows + columns) |
+| Materializer | Make parent results reusable | Task result | Temporary table (`_task_context_<id>`) |
+| Evaluator | Does the candidate meet the requirement? | Requirement + SQL + Result | Quality scores (ranking signals) |
+| Selection | Which candidate is adopted? | Quality scores | Chosen candidate or AMBIGUOUS (tie) |
+| Replanner | Should we try a different plan? | Failure / Ambiguity | Expanded candidate pool |
+| Aggregator | What is the final answer? | All task results | Answer + SQL + step-by-step evidence |
 
-Four responsibilities are always kept separate:
+Four core responsibilities are always kept separate:
 
 ```
-Planner     → "what to solve?"      (RequirementSpec + TaskDAG)
-RLM         → "how to execute?"     (SQL candidates per candidate scope)
-Evaluator   → "does it satisfy?"    (CandidateEvaluation signals)
-Aggregator  → "how to compose?"     (Final Answer, no re-ranking)
+Planner     → "what to solve?"      (what the question requires)
+RLM         → "how to execute?"     (how to get it from the database)
+Evaluator   → "does it satisfy?"    (how well the result matches the requirement)
+Aggregator  → "how to compose?"     (combine task results into one answer)
 ```
 
 v0.3.5b adds a fifth layer between RLM and Aggregator:

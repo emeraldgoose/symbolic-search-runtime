@@ -17,7 +17,11 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
 - **격자 탐색(Grid Search)**: 하이퍼파라미터(`max_depth`, `beam_width`, `max_attempts_per_node`, `calibration_enabled`)를 체계적으로 테스트하여 최적 설정을 찾습니다.
 - **다중 테이블 스키마**: Retriever가 모든 테이블을 관련성별로 점수화하고, Planner가 sub-task별로 테이블을 선택하며, RLM은 시도별 범위(scope)의 테이블만 참조합니다.
 - **실행이 아닌 추론에 대한 탐색**: D&C는 *문제 공간*을 분할하며, SQL을 분할하지 않습니다. 각 하위 문제는 완전한 추론 단위입니다 (생각 → 코드 → 검증 → 실행 → 평가).
-- **플러그형 Executor**: 추상 `BaseExecutor`에 SQLite, JDBC, Spark, Databricks 구현 — PEP 249 호환.
+- **플러그형 Executor**: 추상 `BaseExecutor`에 SQLite, JDBC, Spark, Databricks 구현.
+  표준 쿼리 인터페이스를 사용하는 어떤 데이터베이스든 연결할 수 있습니다.
+- **단계별 근거**: 최종 답변에는 작업 그래프를 실행 순서대로 따라가는 설명이 포함됩니다
+  — 어떤 테이블을 조회했고, 어떤 조건으로 필터링했으며, 몇 건이 조회되었고,
+  어떻게 집계했는지 — 언어 모델을 신뢰하지 않고도 계산 과정을 검증할 수 있습니다.
 
 ## 아키텍처
 
@@ -60,10 +64,11 @@ NL Problem → ProblemSpec → Search(D&C+RLM) → SQL Executor → Optimal Solu
                      ▼
 ┌──────────────────────────────────────────┐
 │  Aggregator — "답을 어떻게 구성할까?"     │
-│  primary leaf, 재랭킹 없음                │
+│  primary leaf, 재랭킹 없음;               │
+│  단계별 근거 체인 생성                     │
 └────────────────────┬─────────────────────┘
                      ▼
-        FINAL ANSWER + SQL + reasoning trace
+        FINAL ANSWER + SQL + 단계별 근거 + reasoning trace
 ```
 
 노드 결과: `SOLVED` → 실제 `_task_context_<id>` 테이블로 materialize되어 하위 task가
@@ -134,14 +139,16 @@ syrch/
 │   │   ├── __init__.py
 │   │   ├── retriever.py          # 키워드 매칭 Retriever (후보 풀 + ordering)
 │   │   ├── semantic_index.py     # 스키마 기반 evidence
+│   │   ├── data_probe.py         # 데이터 수준 사실 검증 (공유 probe 캐시)
+│   │   ├── question_norm.py      # 비영어 질문 정규화
 │   │   ├── planner.py            # D&C: NL -> TaskDAG
 │   │   ├── scheduler.py          # DAG 실행 엔진 (+ context materialize)
 │   │   ├── rlm_engine.py         # RLM 후보 탐색 루프
 │   │   ├── search_policy.py      # 후보 검색 정책 (beam/exhaustive)
-│   │   ├── path_evaluator.py     # PathScore + 판별 신호
+│   │   ├── path_evaluator.py     # 품질 점수 + 랭킹 신호
 │   │   ├── validator.py          # 하드 제약 검사 (구문/스키마/범위)
-│   │   ├── aggregator.py         # 결과 병합 + 휴리스틱
-│   │   ├── calibrator.py         # 실행 신호 (execution-signal) penalties
+│   │   ├── aggregator.py         # 결과 병합 + 단계별 근거
+│   │   ├── calibrator.py         # 실행 페널티
 │   │   ├── clarify.py            # 모호성 감지
 │   │   ├── grid.py               # Grid search
 │   │   └── pipeline.py           # 오케스트레이터
@@ -182,27 +189,51 @@ TaskDAG { nodes: {A, B, C, ...}, root_id, topo_layers }
     ▼
 Scheduler → NodeResult { node_id, data(DataFrame), sql, confidence,
                          selected_candidate, reasoning_paths,
-                         cost_tokens, status(SOLVED/AMBIGUOUS/FAILED/BLOCKED) }
+                         cost_tokens, status(SOLVED/AMBIGUOUS/FAILED/BLOCKED),
+                         had_context, context_used }
     │
     ▼
-Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree }
-             (primary = evidence가 있는 SOLVED 리프; 재랭킹 없음)
+Aggregator → FinalSolution { answer, sql, confidence, data, token_cost, tree,
+                              calculation_basis }
+             (primary = evidence가 있는 SOLVED 리프; 재랭킹 없음;
+              calculation_basis = 단계별 근거 체인)
 ```
+
+`calculation_basis`는 실행된 SQL과 행 수로부터 만든 일반 텍스트 설명입니다
+(DAG를 층별로 따라가며 생성, 언어 모델이 아닌 코드가 생성). 예시:
+
+```
+Step 1 — dw_customer
+  filter: segment = 'VIP' AND valid_from <= '2024-12-31' ...
+  result: 1,247 rows
+Step 2 — dw_sales_order (joined with 1,247 rows from step 1)
+  join: v.customer_id = dso.customer_id
+  filter: order_date BETWEEN '2024-01-01' AND '2024-12-31'
+  aggregate: SUM(total_amount) → 140,866.70 (1 row)
+```
+
+어떤 테이블의 어떤 컬럼을 어떤 기준으로 조회했고 어떻게 집계했는지를
+단계별로 보여주어, 테이블 구조나 SCD 모델링에 대한 가정 없이 계산 과정을
+검증할 수 있습니다.
 
 노드 선택은 후보당 `CandidateEvaluation`을 생성합니다:
 
 ```
 CandidateEvaluation {
-    table, ok, execution_valid, requirement_pass,
+    table, ok, execution_valid, requirement_pass, has_data,
     semantic_match, result_quality,
     structural_match, grain_match, dimension_match, time_match,
-    cost_tokens, candidate_id, confidence, path_score
+    cost_tokens, candidate_id, confidence, error, attempts, path_score
 }
+viable = ok && has_data && execution_valid && requirement_pass
+ranking order: structural_match → grain_match → dimension_match →
+               time_match → result_quality → candidate_id
 ```
 
-선택은 판별 신호만으로 사전식 비교:
-`structural_match → grain_match → dimension_match → time_match → result_quality → candidate_id`.
-두 후보가 모든 신호에서 동률이면 **AMBIGUOUS** — 실행 순서/retriever prior/token cost로 절대 해소하지 않습니다.
+앞의 다섯 신호를 *랭킹 신호*라 부릅니다 — 후보가 작업 요구사항에 얼마나
+잘 맞는지를 비교합니다. 두 후보가 모든 랭킹 신호에서 동점이면
+**AMBIGUOUS** — 실행 순서, 키워드 겹침, 쿼리 비용으로는 승자를 가리지
+않습니다.
 
 ## 설치
 
@@ -235,10 +266,14 @@ result = query(
     executor_type="databricks-sql",
     model="gpt-4o",
 )
-print(result.answer)      # 최종 답변
-print(result.sql)         # 실행된 SQL
-print(result.confidence)  # 신뢰도
-print(result.data)        # 결과 DataFrame
+print(result.answer)              # 최종 답변 텍스트
+print(result.sql)                 # 실행된 SQL (모든 단계)
+print(result.confidence)          # 신뢰도 (0~1)
+print(result.data)                # 결과 DataFrame
+print(result.calculation_basis)   # 단계별 근거 체인
+print(result.tables_used)         # 실제 조회한 물리 테이블 목록
+print(result.tree)                # 작업별 결과 (NodeResult 리스트)
+print(result.dag_nodes)           # 작업 그래프 구조
 ```
 
 ## CLI 사용법
@@ -527,27 +562,28 @@ JOIN  → PRIMARY | JOIN-AVAILABLE | TASK CONTEXT
 | 모듈 | 핵심 질문 | 입력 | 출력 |
 | ---- | --------- | ---- | ---- |
 | Planner | 무엇을 풀까? | Question + Schema | RequirementSpec + DAG |
-| Retriever | 어디를 찾아볼까? | Requirement + Semantic Index | Candidate Pool |
-| SemanticIndex | 어떤 schema evidence가 있나? | DB metadata | semantic evidence |
-| TaskDAG | 작업을 어떻게 나눌까? | RequirementSpec | DAG |
-| Scheduler | 어떤 순서로 실행할까? | DAG | Node execution |
-| ParentContext | 부모 결과를 어떻게 전달할까? | NodeResult | Context metadata + data |
-| RLM | 어떻게 실행할까? | Node + Requirement + Scope | SQL candidates |
-| Validator | SQL이 허용되는가? | SQL + Schema + Scope | Valid/Fail |
-| Executor | SQL을 실행하자 | Valid SQL | ExecutionResult |
-| Materializer | 부모 결과를 재사용 가능하게 만들자 | ParentContext | `_task_context_X` |
-| Evaluator | 후보가 요구사항을 만족하나? | Requirement + SQL + Result | CandidateEvaluation |
-| Selection | 어떤 후보를 채택할까? | CandidateEvaluations | Selected / AMBIGUOUS |
-| Replanner | 탐색을 다시 구성할까? | Failure / Ambiguity | Expanded/merged candidates |
-| Aggregator | 최종 답은 무엇인가? | NodeResults | Final Answer |
+| Retriever | 어디를 찾아볼까? | Requirement + Schema | 후보 풀 (관련도순 정렬) |
+| SemanticIndex | 어떤 schema evidence가 있나? | DB metadata | 스키마 힌트 |
+| DataProbe | 이 값이 실제로 존재하는가? | 후보 테이블 + 필터 값 | 검증된 사실 (모든 작업이 공유) |
+| Pipeline | 전체 단계는 어떻게 연결되는가? | LLM + Executor + Config + Problem | FinalSolution + DAG + 작업별 결과 |
+| TaskDAG | 작업을 어떻게 나눌까? | RequirementSpec | DAG (의존성을 가진 작업 층) |
+| Scheduler | 어떤 순서로 실행할까? | DAG + Executor | 작업 실행 (각 층 내에서는 병렬) |
+| RLM | 어떻게 실행할까? | Task + 후보 범위 | SQL 후보 (후보당 한 번 시도) |
+| Validator | SQL이 허용되는가? | SQL + Schema + Scope | Pass/Fail |
+| Executor | SQL을 실행하자 | 유효한 SQL | 데이터 (행 + 컬럼) |
+| Materializer | 부모 결과를 재사용 가능하게 만들자 | 작업 결과 | 임시 테이블 (`_task_context_<id>`) |
+| Evaluator | 후보가 요구사항을 만족하나? | Requirement + SQL + Result | 품질 점수 (랭킹 신호) |
+| Selection | 어떤 후보를 채택할까? | 품질 점수 | 선택된 후보 또는 AMBIGUOUS (동점) |
+| Replanner | 다른 계획으로 다시 시도할까? | Failure / Ambiguity | 확장된 후보 풀 |
+| Aggregator | 최종 답은 무엇인가? | 모든 작업 결과 | 답변 + SQL + 단계별 근거 |
 
-네 가지 책임은 항상 분리됩니다:
+네 가지 핵심 책임은 항상 분리됩니다:
 
 ```
-Planner     → "무엇을 풀까?"   (RequirementSpec + TaskDAG)
-RLM         → "어떻게 실행할까?" (후보 범위별 SQL candidates)
-Evaluator   → "만족하나?"      (CandidateEvaluation 신호)
-Aggregator  → "어떻게 구성할까?" (Final Answer, 재랭킹 없음)
+Planner     → "무엇을 풀까?"   (질문이 요구하는 것)
+RLM         → "어떻게 실행할까?" (데이터베이스에서 어떻게 가져올지)
+Evaluator   → "만족하나?"      (결과가 요구사항에 얼마나 잘 맞는가)
+Aggregator  → "어떻게 구성할까?" (작업 결과들을 하나의 답변으로 합치기)
 ```
 
 v0.3.5b에서 RLM과 Aggregator 사이에 다섯 번째 계층이 추가됐습니다:
