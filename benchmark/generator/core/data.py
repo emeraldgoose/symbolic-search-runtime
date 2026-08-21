@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from collections.abc import Iterator
 from typing import Any
 
@@ -151,6 +152,9 @@ def generate_table(
     batch_size: int = 10000,
     fk_registry: dict[str, pd.DataFrame] | None = None,
 ) -> Iterator[pd.DataFrame]:
+    if table.scd_columns and table.natural_key:
+        yield from _generate_scd_table(rng, table, batch_size, fk_registry)
+        return
     n = table.rows
     if batch_size <= 0:
         batch_size = n
@@ -172,6 +176,131 @@ def generate_table(
         df = pd.DataFrame(data)
         yield df
         start = end
+
+
+def _generate_scd_table(
+    rng: np.random.Generator,
+    table: TableDef,
+    batch_size: int = 10000,
+    fk_registry: dict[str, pd.DataFrame] | None = None,
+) -> Iterator[pd.DataFrame]:
+    """Generate an SCD Type 2 table.
+
+    Each natural key gets 1-3 versions. Versions for the same key form a
+    contiguous validity chain: version i's valid_to == version i+1's valid_from
+    (the final version has valid_to = NULL and is_current = True). SCD columns
+    are re-sampled per version so attribute changes are real.
+    """
+    n_keys = table.rows
+    if batch_size <= 0:
+        batch_size = n_keys
+
+    col_map = {c.name: c for c in table.columns}
+    scd_cols = [c for c in table.scd_columns or [] if c in col_map]
+    has_is_current = "is_current" in col_map
+    has_valid_from = "valid_from" in col_map
+    has_valid_to = "valid_to" in col_map
+    natural_col = col_map[table.natural_key]
+    pk_col = table.pk
+
+    # A key (customer_id etc.) is a natural id. Per key, decide version count:
+    # 40% 1 version, 40% 2 versions, 20% 3 versions -> avg ~1.8
+    version_probs = np.array([0.40, 0.40, 0.20])
+    version_counts = rng.choice([1, 2, 3], size=n_keys, p=version_probs)
+
+    # Generate natural key values (must be unique per key).
+    if natural_col.fk is not None and fk_registry is not None:
+        ref_table, ref_col = natural_col.fk.split(".", 1)
+        if ref_table in fk_registry and ref_col in fk_registry[ref_table].columns:
+            valid = fk_registry[ref_table][ref_col].dropna().unique()
+            if len(valid) > 0:
+                nats = rng.choice(valid, size=n_keys, replace=False)
+            else:
+                nats = np.arange(1, n_keys + 1)
+        else:
+            nats = np.arange(1, n_keys + 1)
+    elif natural_col.values is not None:
+        nats = rng.choice(natural_col.values, size=n_keys, replace=True)
+    else:
+        lo = natural_col.dist_params.get("min", 1)
+        hi = natural_col.dist_params.get("max", max(lo + n_keys, n_keys * 2))
+        if hi - lo + 1 < n_keys:
+            hi = lo + n_keys
+        nats = rng.choice(np.arange(lo, hi + 1), size=n_keys, replace=False)
+
+    # Stable per-key columns: pk value + non-SCD attributes sampled once per key.
+    base_rows: list[dict[str, Any]] = []
+    for i in range(n_keys):
+        base: dict[str, Any] = {}
+        for col in table.columns:
+            if col.name == natural_col.name:
+                base[col.name] = nats[i]
+            elif pk_col and col.name == pk_col:
+                pass  # surrogate pk filled below only if distinct from natural key
+            elif col.name in scd_cols:
+                pass  # sampled per version
+            elif col.name == "valid_from" or col.name == "valid_to" or col.name == "is_current":
+                pass
+            else:
+                base[col.name] = _generate_column(rng, col, 1, fk_registry)[0]
+        base["_versions"] = int(version_counts[i])
+        base_rows.append(base)
+
+    # Build validity windows per key. Version windows tile [signup, 2024-12-31].
+    ref_start = pd.Timestamp("2020-01-01")
+    ref_end = pd.Timestamp("2024-12-31")
+
+    out: list[pd.DataFrame] = []
+    buf: list[dict[str, Any]] = []
+    pk_counter = 0
+    for base in base_rows:
+        n_ver = base["_versions"]
+        # Anchor the first version at the key's signup date when available.
+        anchor = base.get("signup_date")
+        anchor_ts = pd.Timestamp(anchor) if anchor is not None else ref_start
+        if anchor_ts < ref_start:
+            anchor_ts = ref_start
+        if anchor_ts >= ref_end:
+            anchor_ts = ref_end - datetime.timedelta(days=1)
+        span_days = max(1, (ref_end - anchor_ts).days)
+        # A version needs at least one full day; cap version count to the span.
+        n_ver = min(n_ver, span_days)
+        # Pick n_ver-1 strictly increasing cut points within [1, span_days).
+        # This guarantees each window is non-empty and the chain stays contiguous.
+        if n_ver > 1:
+            pool = np.arange(1, span_days)
+            if len(pool) < n_ver - 1:
+                cuts = np.linspace(1, span_days - 1, n_ver - 1).astype(int)
+            else:
+                cuts = np.sort(rng.choice(pool, size=n_ver - 1, replace=False))
+        else:
+            cuts = np.array([], dtype=int)
+        boundaries = [anchor_ts] + [anchor_ts + datetime.timedelta(days=int(c)) for c in cuts] + [ref_end]
+        for v in range(n_ver):
+            pk_counter += 1
+            row = dict(base)
+            del row["_versions"]
+            if pk_col and pk_col != natural_col.name:
+                row[pk_col] = pk_counter
+            if has_valid_from:
+                row["valid_from"] = boundaries[v]
+            if has_valid_to:
+                if v == n_ver - 1:
+                    row["valid_to"] = None
+                else:
+                    row["valid_to"] = boundaries[v + 1]
+            if has_is_current:
+                row["is_current"] = v == n_ver - 1
+            for scd_name in scd_cols:
+                row[scd_name] = _generate_column(rng, col_map[scd_name], 1, fk_registry)[0]
+            buf.append(row)
+            if len(buf) >= batch_size:
+                out.append(pd.DataFrame(buf))
+                buf = []
+    if buf:
+        out.append(pd.DataFrame(buf))
+    for df in out:
+        yield df
 
 
 def inject_null(

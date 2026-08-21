@@ -7,6 +7,7 @@ tables:
       rows: 10000
     pk: customer_sk
     scd_columns: [segment, tier, address_city]
+    natural_key: customer_id
     columns:
       customer_sk: { type: INTEGER, nullable: false, pk: true, comment: "Surrogate key for SCD" }
       customer_id: { type: INTEGER, nullable: false, comment: "Natural key, may repeat across SCD rows" }
@@ -29,6 +30,7 @@ tables:
       rows: 5000
     pk: product_id
     scd_columns: [unit_price]
+    natural_key: product_id
     columns:
       product_id: { type: INTEGER, nullable: false, pk: true }
       product_name: { type: TEXT, nullable: false, comment: "Product name" }
@@ -73,6 +75,7 @@ tables:
     distribution:
       rows: 200
     scd_columns: [department, position]
+    natural_key: employee_id
     columns:
       employee_id: { type: INTEGER, nullable: false, pk: true }
       name: { type: TEXT, nullable: false }

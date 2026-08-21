@@ -33,6 +33,7 @@ class TableDef:
     layer: str = "dw"
     grain: str = ""
     scd_columns: list[str] | None = None
+    natural_key: str | None = None
     pk: str | None = None
     fks: list[dict[str, str]] = field(default_factory=list)
 
@@ -92,6 +93,7 @@ def load_schema_yaml(path: str | Path) -> list[TableDef]:
                 layer=tdef.get("layer", "dw"),
                 grain=tdef.get("grain", ""),
                 scd_columns=tdef.get("scd_columns"),
+                natural_key=tdef.get("natural_key"),
                 pk=tdef.get("pk"),
                 fks=tdef.get("fks", []),
             )
