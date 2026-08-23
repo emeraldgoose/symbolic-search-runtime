@@ -2,11 +2,6 @@
 
 **English** | [[한국어]](README_ko.md)
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](#ci)
-[![Version](https://img.shields.io/badge/version-0.3.7-blueviolet)](pyproject.toml)
-
 > **Natural language → verifiable SQL → optimal answer.**
 > syrch explores multiple reasoning paths over real databases and picks the winner by evidence, not by guess.
 

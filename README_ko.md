@@ -2,11 +2,6 @@
 
 [[English]](README.md) | **한국어**
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](#ci)
-[![Version](https://img.shields.io/badge/version-0.3.7-blueviolet)](pyproject.toml)
-
 > **자연어 → 검증 가능한 SQL → 최적의 답.**
 > syrch는 실제 데이터베이스에서 여러 추론 경로를 탐색하고, 근거(evidence)로 승자를 가립니다.
 
