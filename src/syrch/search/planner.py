@@ -650,15 +650,22 @@ class Planner:
                 logger.info("  no alternative tables found for node %s", failed_node_id)
             return dag
 
-        # Merge rather than replace: an AMBIGUOUS node already produced viable
-        # results on its current hint tables, so replacing the hint would drop
-        # the correct table from scope (S14). Keep existing hints and expand
-        # with fresh candidates (dedup, bounded).
-        current = [t for t in (failed_node.hint_tables or []) if t not in alternatives]
-        merged = current + alternatives
-        if self.config.verbose:
-            logger.info("  updating hint_tables: %s -> %s", failed_node.hint_tables, merged)
-        failed_node.hint_tables = merged[:8]
+        from syrch.core.models import NodeStatus
+        is_ambiguous = node_result.status == NodeStatus.AMBIGUOUS
+
+        if is_ambiguous:
+            # AMBIGUOUS: viable candidates exist on current hints — merge to preserve them (S14)
+            current = [t for t in (failed_node.hint_tables or []) if t not in alternatives]
+            merged = current + alternatives
+            if self.config.verbose:
+                logger.info("  [AMBIGUOUS] merging hint_tables: %s -> %s", failed_node.hint_tables, merged)
+            failed_node.hint_tables = merged[:8]
+        else:
+            # FAILED/BLOCKED: no viable results — REPLACE hints with fresh alternatives
+            if self.config.verbose:
+                logger.info("  [FAILED] replacing hint_tables: %s -> %s", failed_node.hint_tables, alternatives)
+            failed_node.hint_tables = alternatives[:8]
+
         failed_node.selection_reason = None
         failed_node._compressed_schemas = None
         return dag

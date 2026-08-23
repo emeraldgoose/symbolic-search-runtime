@@ -519,6 +519,55 @@ def test_replan_merges_instead_of_replacing_hint_tables():
     assert "mart_sales_daily" in hints
 
 
+def test_replan_replaces_hint_tables_on_failed_node():
+    """FAILED replan must REPLACE hint tables (not merge) — the old hints
+    produced no viable results, so keeping them only perpetuates the failure.
+    """
+    import pandas as pd
+    from syrch.core.models import NodeResult, NodeStatus, ScoredTable, TableSchema, TaskDAG, TaskNode
+    from syrch.search.planner import Planner
+
+    llm = FakeLLM()
+    config = ExecutionConfig(question="test", db_path=":memory:")
+    planner = Planner(llm, config, retriever=None)
+
+    dag = TaskDAG(
+        nodes={
+            "A": TaskNode(
+                id="A",
+                description="refund counts",
+                depends_on=[],
+                is_atomic=True,
+                hint_tables=["wrong_table"],
+            ),
+        },
+        root_id="A",
+        topo_layers=[["A"]],
+    )
+    # Node FAILED (not AMBIGUOUS) — all candidates exhausted without viable result
+    node_result = NodeResult(
+        node_id="A",
+        data=pd.DataFrame(),
+        sql="",
+        confidence=0.0,
+        status=NodeStatus.FAILED,
+        error="No valid SQL generated",
+    )
+    scored = [
+        ScoredTable(schema=TableSchema(name="correct_table", columns=[]), score=1.0),
+        ScoredTable(schema=TableSchema(name="another_table", columns=[]), score=1.0),
+    ]
+
+    new_dag = planner.replan(dag, "A", "", "No valid SQL generated", node_result, scored)
+
+    hints = new_dag.nodes["A"].hint_tables or []
+    # Old hint "wrong_table" should be GONE (replaced)
+    assert "wrong_table" not in hints
+    # New alternatives should be present
+    assert "correct_table" in hints
+    assert "another_table" in hints
+
+
 def test_replan_drops_infeasible_supporting_relation_from_probe():
     """A supporting relation whose filter value the probe verified does not
     exist is dropped on replan, so the node stops demanding an impossible JOIN."""
