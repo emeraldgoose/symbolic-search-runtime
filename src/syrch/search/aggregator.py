@@ -304,7 +304,7 @@ class Aggregator:
                     f"transaction date per row"
                 )
             elif refs:
-                bounds = sorted({v for v, is_col in refs if not is_col})
+                bounds = sorted({v.strip("'") for v, is_col in refs if not is_col})
                 notes.append(
                     f"{base}: fixed-window overlap approximation — validity "
                     f"filtered with constant bounds {bounds}, NOT evaluated "
