@@ -266,6 +266,90 @@ def test_solved_leaf_keeps_answer_basis():
 
 
 # ---------------------------------------------------------------------------
+# Calculation basis must state WHICH criteria produced THIS number
+# ---------------------------------------------------------------------------
+
+class Scd2SchemaExecutor(NullThenRealExecutor):
+    """Every lookup returns a customers-like schema carrying SCD2 columns."""
+
+    def get_schema(self, table_name=None):
+        return TableSchema(name=table_name or "customers", columns=[
+            ColumnSchema(name="customer_id", type="INTEGER"),
+            ColumnSchema(name="segment", type="TEXT"),
+            ColumnSchema(name="valid_from", type="DATE"),
+            ColumnSchema(name="valid_to", type="DATE"),
+        ])
+
+
+def _criteria_for(sql: str) -> str:
+    from syrch.search.aggregator import Aggregator
+
+    agg = Aggregator(AggLLM(), Scd2SchemaExecutor(), _agg_config())
+    return agg._extract_criteria(sql)
+
+
+def test_basis_reports_fixed_window_overlap_and_missing_refund_filter():
+    sql = (
+        "SELECT customer_id FROM dw_customer "
+        "WHERE segment = 'VIP' AND valid_from <= '2024-12-31' "
+        "AND (valid_to > '2024-01-01' OR valid_to IS NULL)"
+    )
+    basis = _criteria_for(sql)
+    assert "time window: 2024-01-01 .. 2024-12-31" in basis
+    assert "NOT APPLIED" in basis
+    assert "fixed-window overlap approximation" in basis
+    assert "NOT evaluated per order" in basis
+
+
+def test_basis_reports_point_in_time_scd2_and_refund_exclusion():
+    sql = (
+        "SELECT SUM(o.total_amount) AS v FROM dw_sales_order o "
+        "JOIN dw_customer c ON o.customer_id = c.customer_id "
+        "AND o.order_date >= c.valid_from "
+        "AND (c.valid_to IS NULL OR o.order_date <= c.valid_to) "
+        "WHERE o.status != 'refunded' AND c.segment = 'VIP'"
+    )
+    basis = _criteria_for(sql)
+    assert "point-in-time" in basis
+    assert "applied (status != 'refunded')" in basis
+
+
+def test_basis_reports_ignored_validity_window():
+    sql = "SELECT SUM(o.total) FROM orders o JOIN customers c ON o.customer_id = c.customer_id"
+    basis = _criteria_for(sql)
+    assert "validity window ignored" in basis
+
+
+def test_calculation_basis_prefixed_into_solution():
+    """merge() output carries the criteria block ahead of the steps."""
+    from syrch.search.aggregator import Aggregator
+    from syrch.core.models import TaskDAG
+
+    dag = TaskDAG(
+        nodes={"C": TaskNode(id="C", description="final", is_atomic=True)},
+        root_id="C", topo_layers=[["C"]],
+    )
+    solved = NodeResult(
+        node_id="C",
+        data=pd.DataFrame({"total_net_revenue": [81959.47]}),
+        sql=(
+            "SELECT SUM(o.total_amount) AS total_net_revenue "
+            "FROM dw_sales_order o JOIN dw_customer c "
+            "ON o.customer_id = c.customer_id AND o.order_date >= c.valid_from "
+            "WHERE o.status != 'refunded'"
+        ),
+        confidence=0.95,
+        status=NodeStatus.SOLVED,
+    )
+    aggregator = Aggregator(AggLLM(), Scd2SchemaExecutor(), _agg_config())
+    solution = aggregator.merge("q", dag, {"C": solved})
+
+    assert solution.calculation_basis.startswith("Criteria applied")
+    assert "point-in-time" in solution.calculation_basis
+    assert "Step 1" in solution.calculation_basis
+
+
+# ---------------------------------------------------------------------------
 # GT guesser must stay log-only
 # ---------------------------------------------------------------------------
 

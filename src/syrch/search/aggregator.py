@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 import re
+from typing import Any
 
 import pandas as pd
 from langdetect import detect, DetectorFactory, LangDetectException
@@ -68,6 +69,7 @@ class Aggregator:
         self.llm = llm
         self.executor = executor
         self.config = config
+        self._schema_memo: dict[str, Any | None] = {}
 
     def merge(
         self,
@@ -198,9 +200,155 @@ class Aggregator:
         Derived from executed SQL + row counts only (no LLM re-interpretation).
         Each step names the table, filter criteria and how the result was
         aggregated, so the user can verify the calculation from observable
-        facts alone.
+        facts alone. Preceded by a deterministic criteria block stating which
+        semantic decisions the executed queries encode (time window, refund/
+        status exclusion, SCD2 entity-state semantics) — different legitimate
+        readings of the same question yield different numbers, so the basis
+        must say which reading produced THIS number.
         """
-        return self._build_step_explanation(sql_lines, results)
+        steps = self._build_step_explanation(sql_lines, results)
+        criteria = self._extract_criteria("\n\n".join(sql_lines))
+        parts: list[str] = []
+        if criteria:
+            parts.append("Criteria applied (derived from executed SQL):\n" + criteria)
+        if steps:
+            parts.append(steps)
+        return "\n\n".join(parts)
+
+    def _extract_criteria(self, sql_text: str) -> str:
+        """Deterministic semantic-criteria summary of the executed SQL.
+
+        Observable facts only: literal date bounds, status/refund predicates,
+        and how SCD2 validity columns are actually compared (per-order column
+        reference vs constant bound vs ignored). Never consults ground truth;
+        unknowns are stated as unknown instead of guessed."""
+        lines: list[str] = []
+
+        iso_dates = sorted(set(re.findall(r"'(\d{4}(?:-\d{2}){0,2})(?:-\d{2})?'", sql_text)))
+        if iso_dates:
+            lines.append(
+                f"- time window: {iso_dates[0]} .. {iso_dates[-1]}"
+            )
+        else:
+            lines.append("- time window: none explicitly bounded in SQL")
+
+        excl = self._detect_status_exclusion(sql_text)
+        lines.append(f"- refund/status exclusion: {excl}")
+
+        for note in self._detect_scd2_semantics(sql_text):
+            lines.append(f"- entity state (SCD2): {note}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _detect_status_exclusion(sql_text: str) -> str:
+        """Report whether a status-like predicate excludes outcome values."""
+        m = re.search(
+            r"\b(\w*status\w*)\s*(?:!=|<>\s*)\s*'([a-z_]+)'",
+            sql_text,
+            re.IGNORECASE,
+        )
+        if m:
+            return f"applied ({m.group(1)} != '{m.group(2)}')"
+        neg_in = re.search(
+            r"\b(\w*status\w*)\s+not\s+in\s*\(([^)]+)\)",
+            sql_text,
+            re.IGNORECASE,
+        )
+        if neg_in:
+            return f"applied ({neg_in.group(1)} not in {neg_in.group(2).strip()})"
+        return (
+            "NOT APPLIED — totals include refunded/cancelled orders "
+            "if such rows exist"
+        )
+
+    def _detect_scd2_semantics(self, sql_text: str) -> list[str]:
+        """Classify how each SCD2 source table's validity window was applied.
+
+        point-in-time  — validity columns compared against another COLUMN
+                         (e.g. o.order_date >= c.valid_from or
+                         o.order_date <= c.valid_to): the state as of each
+                         transaction decides membership.
+        fixed-window   — validity columns compared only against LITERAL bounds
+                         (e.g. valid_from <= '2024-12-31'): an overlap
+                         approximation, not per-order state.
+        ignored        — table carries validity columns but the SQL never
+                         references them.
+        """
+        notes: list[str] = []
+        seen_tables: set[str] = set()
+        table_pattern = re.compile(
+            r"\b(?:FROM|JOIN)\s+([\w\.]+)"
+            r"(?:\s+(?:AS\s+)?)?"
+            r"(?!(?:JOIN|WHERE|GROUP|ORDER|ON|AS|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|LIMIT|HAVING)\b)"
+            r"(\w+)?",
+            re.IGNORECASE,
+        )
+        for match in table_pattern.finditer(sql_text):
+            table = match.group(1)
+            alias = match.group(2)
+            base = table.split(".")[-1]
+            if base.lower() in seen_tables:
+                continue
+            schema = self._cached_schema(table)
+            if schema is None:
+                continue
+            cols = {c.name.lower() for c in schema.columns}
+            if not {"valid_from", "valid_to"} <= cols:
+                continue
+            seen_tables.add(base.lower())
+            refs = self._validity_comparisons(sql_text, [q for q in {alias, base} if q])
+            if any(rhs_is_column for _, rhs_is_column in refs):
+                notes.append(
+                    f"{base}: point-in-time — validity compared against the "
+                    f"transaction date per row"
+                )
+            elif refs:
+                bounds = sorted({v for v, is_col in refs if not is_col})
+                notes.append(
+                    f"{base}: fixed-window overlap approximation — validity "
+                    f"filtered with constant bounds {bounds}, NOT evaluated "
+                    f"per order"
+                )
+            else:
+                notes.append(
+                    f"{base}: validity window ignored — rows used regardless "
+                    f"of state at transaction time"
+                )
+        return notes
+
+    def _cached_schema(self, table: str):
+        if table not in self._schema_memo:
+            try:
+                self._schema_memo[table] = self.executor.get_schema(table)
+            except Exception:
+                self._schema_memo[table] = None
+        return self._schema_memo[table]
+
+    @staticmethod
+    def _validity_comparisons(
+        sql_text: str, qualifiers: list[str]
+    ) -> list[tuple[str, bool]]:
+        """Find validity-column comparisons in either orientation:
+        `q.valid_(from|to) <op> rhs` or `rhs <op> q.valid_(from|to)`.
+
+        Returns (rhs_token, rhs_is_column_ref) pairs. A quoted literal is not
+        a column ref; anything else (dotted or bare identifier) is treated as
+        one."""
+        out: list[tuple[str, bool]] = []
+        qual = "|".join(re.escape(q) for q in qualifiers)
+        # Qualifier is optional: SQL frequently references validity columns
+        # unqualified (single-table WHERE clauses).
+        col = rf"(?:(?:{qual})\.)?valid_(?:from|to)"
+        op = r"\s*(?:>=|<=|<>|=|>|<)\s*"
+        for m in re.finditer(rf"\b(?:{col}){op}([^\s(),]+)", sql_text, re.IGNORECASE):
+            rhs = m.group(1)
+            out.append((rhs, not rhs.startswith("'")))
+        for m in re.finditer(rf"\b([\w\.]+){op}(?:{col})\b", sql_text, re.IGNORECASE):
+            lhs = m.group(1)
+            if not lhs.lower().endswith("valid_from") and not lhs.lower().endswith("valid_to"):
+                out.append((lhs, True))
+        return out
 
     def _build_step_explanation(
         self, sql_lines: list[str], results: dict[str, NodeResult]
