@@ -189,11 +189,16 @@ class Aggregator:
             path_score=path_score,
             token_cost=total_tokens,
             tree=list(results.values()),
-            calculation_basis=self._build_calculation_basis(sql_lines, results),
+            calculation_basis=self._build_calculation_basis(
+                sql_lines, results, lang_name,
+            ),
         )
 
     def _build_calculation_basis(
-        self, sql_lines: list[str], results: dict[str, NodeResult]
+        self,
+        sql_lines: list[str],
+        results: dict[str, NodeResult],
+        lang_name: str | None = None,
     ) -> str:
         """Step-by-step explanation of how the final numbers were computed.
 
@@ -204,44 +209,56 @@ class Aggregator:
         semantic decisions the executed queries encode (time window, refund/
         status exclusion, SCD2 entity-state semantics) — different legitimate
         readings of the same question yield different numbers, so the basis
-        must say which reading produced THIS number.
+        must say which reading produced THIS number. User-visible labels are
+        localized to the question language; internals (table/column names and
+        literal values) stay in English/schema form.
         """
-        steps = self._build_step_explanation(sql_lines, results)
-        criteria = self._extract_criteria("\n\n".join(sql_lines))
+        is_ko = self._is_korean(lang_name or _detect_language(sql_lines[0] if sql_lines else ""))
+        steps = self._build_step_explanation(sql_lines, results, is_ko)
+        criteria = self._extract_criteria("\n\n".join(sql_lines), is_ko)
+        if is_ko:
+            header = "적용 기준 (실행된 SQL에서 도출):"
+        else:
+            header = "Criteria applied (derived from executed SQL):"
         parts: list[str] = []
         if criteria:
-            parts.append("Criteria applied (derived from executed SQL):\n" + criteria)
+            parts.append(f"{header}\n{criteria}")
         if steps:
             parts.append(steps)
         return "\n\n".join(parts)
 
-    def _extract_criteria(self, sql_text: str) -> str:
+    def _extract_criteria(self, sql_text: str, is_ko: bool = False) -> str:
         """Deterministic semantic-criteria summary of the executed SQL.
 
         Observable facts only: literal date bounds, status/refund predicates,
         and how SCD2 validity columns are actually compared (per-order column
         reference vs constant bound vs ignored). Never consults ground truth;
-        unknowns are stated as unknown instead of guessed."""
+        unknowns are stated as unknown instead of guessed. Labels localized;
+        values/schema names stay in English."""
         lines: list[str] = []
 
         iso_dates = sorted(set(re.findall(r"'(\d{4}(?:-\d{2}){0,2})(?:-\d{2})?'", sql_text)))
         if iso_dates:
-            lines.append(
-                f"- time window: {iso_dates[0]} .. {iso_dates[-1]}"
-            )
+            label = "시간 범위" if is_ko else "time window"
+            lines.append(f"- {label}: {iso_dates[0]} .. {iso_dates[-1]}")
         else:
-            lines.append("- time window: none explicitly bounded in SQL")
+            label = "시간 범위" if is_ko else "time window"
+            none = "SQL에 명시된 시간 범위 없음" if is_ko else "none explicitly bounded in SQL"
+            lines.append(f"- {label}: {none}")
 
-        excl = self._detect_status_exclusion(sql_text)
-        lines.append(f"- refund/status exclusion: {excl}")
+        excl = self._detect_status_exclusion(sql_text, is_ko)
+        label = "환불/상태 제외" if is_ko else "refund/status exclusion"
+        lines.append(f"- {label}: {excl}")
 
-        for note in self._detect_scd2_semantics(sql_text):
-            lines.append(f"- entity state (SCD2): {note}")
+        for note in self._detect_scd2_semantics(sql_text, is_ko):
+            if is_ko:
+                lines.append(f"- 엔티티 상태 (SCD2): {note}")
+            else:
+                lines.append(f"- entity state (SCD2): {note}")
 
         return "\n".join(lines)
 
-    @staticmethod
-    def _detect_status_exclusion(sql_text: str) -> str:
+    def _detect_status_exclusion(self, sql_text: str, is_ko: bool = False) -> str:
         """Report whether a status-like predicate excludes outcome values."""
         m = re.search(
             r"\b(\w*status\w*)\s*(?:!=|<>\s*)\s*'([a-z_]+)'",
@@ -249,20 +266,24 @@ class Aggregator:
             re.IGNORECASE,
         )
         if m:
-            return f"applied ({m.group(1)} != '{m.group(2)}')"
+            loc = "적용됨" if is_ko else "applied"
+            return f"{loc} ({m.group(1)} != '{m.group(2)}')"
         neg_in = re.search(
             r"\b(\w*status\w*)\s+not\s+in\s*\(([^)]+)\)",
             sql_text,
             re.IGNORECASE,
         )
         if neg_in:
-            return f"applied ({neg_in.group(1)} not in {neg_in.group(2).strip()})"
+            loc = "적용됨" if is_ko else "applied"
+            return f"{loc} ({neg_in.group(1)} not in {neg_in.group(2).strip()})"
+        if is_ko:
+            return "미적용 — 환불/취소 주문이 있다면 합계에 포함됨"
         return (
             "NOT APPLIED — totals include refunded/cancelled orders "
             "if such rows exist"
         )
 
-    def _detect_scd2_semantics(self, sql_text: str) -> list[str]:
+    def _detect_scd2_semantics(self, sql_text: str, is_ko: bool = False) -> list[str]:
         """Classify how each SCD2 source table's validity window was applied.
 
         point-in-time  — validity columns compared against another COLUMN
@@ -299,22 +320,38 @@ class Aggregator:
             seen_tables.add(base.lower())
             refs = self._validity_comparisons(sql_text, [q for q in {alias, base} if q])
             if any(rhs_is_column for _, rhs_is_column in refs):
-                notes.append(
-                    f"{base}: point-in-time — validity compared against the "
-                    f"transaction date per row"
-                )
+                if is_ko:
+                    notes.append(
+                        f"{base}: 주문시점 판정 — 거래일 기준으로 상태 판단"
+                    )
+                else:
+                    notes.append(
+                        f"{base}: point-in-time — validity compared against the "
+                        f"transaction date per row"
+                    )
             elif refs:
                 bounds = sorted({v.strip("'") for v, is_col in refs if not is_col})
-                notes.append(
-                    f"{base}: fixed-window overlap approximation — validity "
-                    f"filtered with constant bounds {bounds}, NOT evaluated "
-                    f"per order"
-                )
+                if is_ko:
+                    notes.append(
+                        f"{base}: 고정 창 겹침 근사 — 상수 경계 {bounds} 로 필터링, "
+                        f"주문별 판정 아님"
+                    )
+                else:
+                    notes.append(
+                        f"{base}: fixed-window overlap approximation — validity "
+                        f"filtered with constant bounds {bounds}, NOT evaluated "
+                        f"per order"
+                    )
             else:
-                notes.append(
-                    f"{base}: validity window ignored — rows used regardless "
-                    f"of state at transaction time"
-                )
+                if is_ko:
+                    notes.append(
+                        f"{base}: 유효 기간 무시 — 거래시점 상태와 무관하게 사용"
+                    )
+                else:
+                    notes.append(
+                        f"{base}: validity window ignored — rows used regardless "
+                        f"of state at transaction time"
+                    )
         return notes
 
     def _cached_schema(self, table: str):
@@ -350,8 +387,15 @@ class Aggregator:
                 out.append((lhs, True))
         return out
 
+    @staticmethod
+    def _is_korean(lang_name: str) -> bool:
+        return (lang_name or "").lower() == "korean"
+
     def _build_step_explanation(
-        self, sql_lines: list[str], results: dict[str, NodeResult]
+        self,
+        sql_lines: list[str],
+        results: dict[str, NodeResult],
+        is_ko: bool = False,
     ) -> str:
         dag = getattr(self, '_last_dag', None)
 
@@ -376,7 +420,7 @@ class Aggregator:
                 if res is None or not res.sql:
                     continue
                 step_no += 1
-                text = self._render_step(step_no, nid, res, by_id)
+                text = self._render_step(step_no, nid, res, by_id, is_ko)
                 if text:
                     steps.append(text)
             # Any results not in DAG order (orphan nodes)
@@ -388,7 +432,7 @@ class Aggregator:
                 if res is None:
                     continue
                 step_no += 1
-                text = self._render_step(step_no, orphan_nid, res, by_id)
+                text = self._render_step(step_no, orphan_nid, res, by_id, is_ko)
                 if text:
                     steps.append(text)
         else:
@@ -405,7 +449,7 @@ class Aggregator:
                             nid = r.node_id
                             break
                 if res is not None:
-                    text = self._render_step(idx + 1, nid, res, by_id)
+                    text = self._render_step(idx + 1, nid, res, by_id, is_ko)
                 else:
                     text = self._summarize_sql_fallback(sql, sql_to_id)
                 if text:
@@ -419,6 +463,7 @@ class Aggregator:
         node_id: str,
         res: NodeResult,
         by_id: dict[str, NodeResult],
+        is_ko: bool = False,
     ) -> str:
         sql = res.sql
         row_count = len(res.data) if res.data is not None and not res.data.empty else 0
@@ -475,13 +520,21 @@ class Aggregator:
         table_label = " + ".join(phys_tables) if phys_tables else (tables[0] if tables else "?")
 
         lines: list[str] = []
-        lines.append(f"Step {step_no} — {table_label}{depends_label}")
+        if is_ko:
+            lines.append(f"단계 {step_no} — {table_label}{depends_label}")
+        else:
+            lines.append(f"Step {step_no} — {table_label}{depends_label}")
+
+        fk = "필터" if is_ko else "filter"
+        jk = "조인" if is_ko else "join"
+        ak = "집계" if is_ko else "aggregate"
+        rk = "결과" if is_ko else "result"
 
         if where_conds:
-            lines.append(f"  filter: {' AND '.join(where_conds)}")
+            lines.append(f"  {fk}: {' AND '.join(where_conds)}")
 
         if join_conds:
-            lines.append(f"  join: {' AND '.join(join_conds)}")
+            lines.append(f"  {jk}: {' AND '.join(join_conds)}")
 
         if aggs:
             agg_str = ", ".join(f"{a.upper()}({c.strip()})" for a, c in aggs)
@@ -489,17 +542,17 @@ class Aggregator:
                 try:
                     val = res.data.iloc[0].iloc[0]
                     if isinstance(val, float):
-                        lines.append(f"  aggregate: {agg_str} → {val:,.2f} ({row_count} row)")
+                        lines.append(f"  {ak}: {agg_str} → {val:,.2f} ({row_count} row)")
                     else:
-                        lines.append(f"  aggregate: {agg_str} → {val} ({row_count} row)")
+                        lines.append(f"  {ak}: {agg_str} → {val} ({row_count} row)")
                 except Exception:
-                    lines.append(f"  aggregate: {agg_str} ({row_count} row)")
+                    lines.append(f"  {ak}: {agg_str} ({row_count} row)")
             elif row_count > 0:
-                lines.append(f"  aggregate: {agg_str} ({row_count:,} rows)")
+                lines.append(f"  {ak}: {agg_str} ({row_count:,} rows)")
             else:
-                lines.append(f"  aggregate: {agg_str}")
+                lines.append(f"  {ak}: {agg_str}")
         elif row_count > 0:
-            lines.append(f"  result: {row_count:,} rows")
+            lines.append(f"  {rk}: {row_count:,} rows")
 
         return "\n".join(lines)
 
