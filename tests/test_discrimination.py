@@ -87,8 +87,87 @@ def test_dimension_match_uses_requirement_dimensions():
 
 
 def test_time_match_requires_date_column():
+    """Tier 1 (schema): a candidate without any date-like column can never
+    serve a time-ranged requirement."""
     ev = PathEvaluator()
     req = _node(time_range=("2024-01-01", "2024-12-31"))
-    assert ev.time_match(req, _table("dw_sales_order", ("order_date", "total"))) == 1.0
+    # No coverage evidence → unknown, honest neutral score (was fake 1.0)
+    assert ev.time_match(req, _table("dw_sales_order", ("order_date", "total"))) == 0.5
+    # No date-like column at all → cannot serve the window
     assert ev.time_match(req, _table("mart_sales", ("total",))) == 0.0
+    # No time_range requirement → neutral
     assert ev.time_match(_node(), _table("x")) == 1.0
+
+
+def test_time_match_coverage_separates_archive_from_fact():
+    """Tier 2 (COVERAGE probe): a table whose data ends before the requested
+    window scores 0.0; one covering it scores 1.0 (S-run: archive_orders_2021
+    passed the old name-only check for a 2024 question)."""
+    from syrch.search.data_probe import TimeCoverage
+
+    ev = PathEvaluator()
+    req = _node(time_range=("2024-01-01", "2024-12-31"))
+    schema = TableSchema(
+        name="dw_sales_order",
+        columns=[ColumnSchema(name="order_date", type="DATE")],
+    )
+    covering = TimeCoverage(
+        table="dw_sales_order", column="order_date",
+        min_value="2023-01-01", max_value="2024-06-30",
+    )
+    assert ev.time_match(req, schema, covering) == 1.0
+
+    archive = TableSchema(
+        name="archive_orders_2021",
+        columns=[ColumnSchema(name="order_date", type="DATE")],
+    )
+    stale = TimeCoverage(
+        table="archive_orders_2021", column="order_date",
+        min_value="2021-01-01", max_value="2021-12-31",
+    )
+    assert ev.time_match(req, archive, stale) == 0.0
+
+
+def test_time_match_coverage_unknown_is_neutral_not_punished():
+    """A failed/absent coverage probe must not fabricate discrimination."""
+    from syrch.search.data_probe import TimeCoverage
+
+    ev = PathEvaluator()
+    req = _node(time_range=("2024-01-01", "2024-12-31"))
+    schema = TableSchema(
+        name="t", columns=[ColumnSchema(name="event_ts", type="TIMESTAMP")]
+    )
+    assert ev.time_match(req, schema, None) == 0.5
+    empty_cov = TimeCoverage(table="t", column="event_ts")
+    assert ev.time_match(req, schema, empty_cov) == 0.5
+
+
+def test_metric_feasible_gate_excludes_dimension_tables():
+    """Capability gate: dim_date holds integer calendar keys but no measure —
+    it must not enter ranking for a revenue requirement (S-run: dim_date was
+    one alphabetical tie-break away from 'winning' a revenue task)."""
+    ev = PathEvaluator()
+    req = _node()  # metrics=["total"], aggregation=sum
+
+    dim_date = TableSchema(name="dim_date", columns=[
+        ColumnSchema(name="date_key", type="INTEGER"),
+        ColumnSchema(name="year", type="INTEGER"),
+        ColumnSchema(name="month", type="INTEGER"),
+    ])
+    assert ev.metric_feasible(req, dim_date) is False
+
+    fact = TableSchema(name="dw_sales_order", columns=[
+        ColumnSchema(name="customer_id", type="INTEGER"),
+        ColumnSchema(name="total_amount", type="DOUBLE"),
+    ])
+    assert ev.metric_feasible(req, fact) is True
+
+
+def test_metric_feasible_true_when_no_metrics_required():
+    """Without metric requirements the gate never fires (lookup tasks)."""
+    ev = PathEvaluator()
+    node = TaskNode(id="A", description="list dates", is_atomic=True)
+    dim_date = TableSchema(name="dim_date", columns=[
+        ColumnSchema(name="date_key", type="INTEGER"),
+    ])
+    assert ev.metric_feasible(node, dim_date) is True

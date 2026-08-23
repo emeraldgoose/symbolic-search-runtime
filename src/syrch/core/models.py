@@ -315,6 +315,7 @@ class CandidateEvaluation:
     ok: bool = False
     execution_valid: bool = False
     requirement_pass: bool = False
+    metric_feasible: bool = True
     semantic_match: float = 0.0
     result_quality: float = 0.0
     structural_match: float = 0.0
@@ -336,6 +337,7 @@ class CandidateEvaluation:
             and self.has_data
             and self.execution_valid
             and self.requirement_pass
+            and self.metric_feasible
         )
 
     @property

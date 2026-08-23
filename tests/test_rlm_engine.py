@@ -535,7 +535,7 @@ def test_requirement_feasible_when_probe_has_positive_fact():
     """A positive probe fact (value EXISTS) does not trigger the infeasibility
     gate — the supporting relation remains satisfiable."""
     from syrch.core.models import (
-        RequirementSpec, SupportingRelation, NodeStatus,
+        ColumnSchema, RequirementSpec, SupportingRelation, NodeStatus,
     )
     from syrch.search.data_probe import ProbeRegistry, ProbeResult
     from syrch.search.rlm_engine import RLMAgent
@@ -568,7 +568,18 @@ def test_requirement_feasible_when_probe_has_positive_fact():
         max_attempts_per_node=2,
         verbose=False,
     )
-    agent = RLMAgent(SolutionLLM(), FakeExecutor(), config, probe_registry=registry)
+
+    # FakeExecutor's bare `x` column carries no measure token; add one so the
+    # candidate passes the metric-feasibility capability gate (the subject of
+    # this test is the infeasibility gate, not lexical feasibility).
+    class MeasureExecutor(FakeExecutor):
+        def get_schema(self, table_name=None):
+            schema = super().get_schema(table_name)
+            if schema.name == "test":
+                schema.columns.append(ColumnSchema(name="revenue_amount", type="REAL"))
+            return schema
+
+    agent = RLMAgent(SolutionLLM(), MeasureExecutor(), config, probe_registry=registry)
     node = TaskNode(
         id="C",
         description="VIP net revenue",

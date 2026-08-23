@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from syrch.core.models import PathScore, TaskNode, ValidationResult, base_table_name
 from syrch.search.calibrator import ExecutionSignals
+from syrch.search.data_probe import TimeCoverage
 
 
 _GRAIN_MARKERS: dict[str, set[str]] = {
@@ -176,16 +177,102 @@ class PathEvaluator:
         hits = sum(1.0 for d in dims if self._token_overlap(d, cols))
         return hits / len(dims)
 
-    def time_match(self, node: TaskNode, schema) -> float:
-        """Requirement time range vs candidate time column (discrimination)."""
+    def time_match(
+        self,
+        node: TaskNode,
+        schema,
+        coverage: "TimeCoverage | None" = None,
+    ) -> float:
+        """Requirement time range vs candidate time evidence (discrimination).
+
+        Three tiers, from cheap to decisive:
+        1. schema: a date-like column must exist (0.0 otherwise);
+        2. COVERAGE probe: when the observed [min, max] of the candidate's
+           time data is known, a candidate whose data does not overlap the
+           requested window scores 0.0 — an archive table ending in 2021
+           cannot answer a 2024 question. This is capability evidence derived
+           uniformly from requirement+candidate (see TimeCoverage contract),
+           not ground-truth knowledge.
+        3. unknown coverage (probe failed / no resolvable column) → 0.5 so a
+           probe outage never fabricates discrimination.
+        """
         req = node.requirements
         if not req or not req.time_range:
             return 1.0
-        has_date = any(
-            any(tok in c.name.lower() for tok in ("date", "time", "_at", "_ts"))
-            for c in schema.columns
-        )
-        return 1.0 if has_date else 0.0
+        date_cols = [
+            c for c in schema.columns
+            if any(tok in c.name.lower() for tok in ("date", "time", "_at", "_ts"))
+        ]
+        if not date_cols:
+            return 0.0
+
+        if coverage is None or (not coverage.min_value and not coverage.max_value):
+            return 0.5
+
+        # The probe may have resolved a non-date column (e.g. a STRING
+        # last_order_date); only trust coverage measured on a column we would
+        # ourselves classify as a date column.
+        date_col_names = {c.name for c in date_cols}
+        if coverage.column not in date_col_names:
+            return 0.5
+
+        start, end = req.time_range[0], req.time_range[1]
+        covers = coverage.covers(start, end)
+        if covers is None:
+            return 0.5
+        return 1.0 if covers else 0.0
+
+    # Tokens that plausibly name a numeric measure column. Deliberately
+    # excludes calendar parts (year/month/day/quarter/week) so dimension
+    # tables cannot pass by counting their integer keys.
+    _MEASURE_TOKENS = {
+        "amount", "revenue", "sales", "total", "net", "gross",
+        "qty", "quantity", "price", "spend", "cost", "expense",
+        "profit", "margin", "discount", "refund", "fee", "tax",
+        "balance", "value", "gmv", "ltv", "count", "cnt", "views",
+        "clicks", "impressions", "sessions",
+    }
+    _NUMERIC_TYPES = {
+        "int", "integer", "bigint", "smallint", "tinyint",
+        "real", "float", "double", "decimal", "numeric",
+    }
+
+    @classmethod
+    def metric_feasible(cls, node: TaskNode, schema) -> bool:
+        """Capability gate: can this candidate express the required metric?
+
+        True unless the requirement names metrics AND the candidate has no
+        numeric column whose name tokens intersect either the measure
+        vocabulary or the metric terms themselves. Lexical/schema-level (same
+        class as dimension_match), uniform across candidates, GT-free. This
+        removes tables like dim_date — whose integer year/month keys are
+        numeric but are not measures — from ranking entry entirely.
+        """
+        import re as _re
+
+        req = node.requirements
+        metric_names: list[str] = []
+        if req:
+            metric_names.extend(req.metrics)
+            metric_names.extend(md.name for md in req.metric_details)
+        if not metric_names:
+            return True
+
+        metric_tokens: set[str] = set()
+        for m in metric_names:
+            metric_tokens |= {
+                t for t in _re.split(r"[^a-z0-9]+", m.lower()) if len(t) > 1
+            }
+
+        for c in schema.columns:
+            if c.type.lower() not in cls._NUMERIC_TYPES:
+                continue
+            parts = set(c.name.lower().split("_"))
+            if parts & cls._MEASURE_TOKENS:
+                return True
+            if parts & metric_tokens:
+                return True
+        return False
 
     @staticmethod
     def _token_overlap(term: str, candidates: Iterable[str]) -> bool:

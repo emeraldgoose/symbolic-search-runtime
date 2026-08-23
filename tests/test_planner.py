@@ -572,8 +572,7 @@ def test_replan_drops_infeasible_supporting_relation_from_probe():
     """A supporting relation whose filter value the probe verified does not
     exist is dropped on replan, so the node stops demanding an impossible JOIN."""
     from syrch.core.models import (
-        NodeResult, NodeStatus, RequirementSpec, ScoredTable,
-        SupportingRelation, TableSchema, TaskDAG, TaskNode,
+        NodeResult, NodeStatus, RequirementSpec, SupportingRelation, TaskDAG, TaskNode,
     )
     from syrch.search.data_probe import ProbeRegistry, ProbeResult
     from syrch.search.planner import Planner
@@ -636,8 +635,7 @@ def test_replan_drops_infeasible_supporting_relation_from_probe():
 def test_replan_keeps_relations_when_no_probe_fact():
     """Without a probe fact, supporting relations survive replan unchanged."""
     from syrch.core.models import (
-        NodeResult, NodeStatus, RequirementSpec, ScoredTable,
-        SupportingRelation, TableSchema, TaskDAG, TaskNode,
+        NodeResult, NodeStatus, RequirementSpec, SupportingRelation, TaskDAG, TaskNode,
     )
     from syrch.search.data_probe import ProbeRegistry
     from syrch.search.planner import Planner

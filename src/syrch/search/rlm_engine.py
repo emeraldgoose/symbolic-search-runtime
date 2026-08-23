@@ -26,7 +26,7 @@ from syrch.executors.base import BaseExecutor
 from syrch.llm.base import BaseLLM
 from syrch.search.calibrator import ExecutionSignals
 from syrch.search.clarify import compute_ambiguity_score
-from syrch.search.data_probe import DataProbe, ProbeRegistry, ProbeResult
+from syrch.search.data_probe import DataProbe, ProbeRegistry, ProbeResult, TimeCoverage
 from syrch.search.path_evaluator import PathEvaluator
 from syrch.search.retriever import Retriever
 from syrch.search.search_policy import build_policy
@@ -449,6 +449,7 @@ class RLMAgent:
         evaluator: PathEvaluator,
     ) -> CandidateEvaluation:
         ps = result.path_score
+        coverage = self._candidate_time_coverage(node, cand)
         return CandidateEvaluation(
             table=cand.schema.name,
             ok=ok,
@@ -456,6 +457,7 @@ class RLMAgent:
             requirement_pass=bool(
                 result.validation is not None and result.validation.passed
             ),
+            metric_feasible=evaluator.metric_feasible(node, cand.schema),
             semantic_match=evaluator.semantic_match(node, cand.schema, result.data),
             result_quality=ps.execution_signal if ps else 0.0,
             structural_match=evaluator.structural_match(
@@ -463,7 +465,7 @@ class RLMAgent:
             ),
             grain_match=evaluator.grain_match(node, cand.schema),
             dimension_match=evaluator.dimension_match(node, cand.schema),
-            time_match=evaluator.time_match(node, cand.schema),
+            time_match=evaluator.time_match(node, cand.schema, coverage),
             cost_tokens=result.cost_tokens,
             candidate_id=cand.schema.name,
             confidence=result.confidence,
@@ -471,6 +473,34 @@ class RLMAgent:
             attempts=len(result.reasoning_paths),
             has_data=result.data is not None and not result.data.empty,
             path_score=ps,
+        )
+
+    def _candidate_time_coverage(
+        self, node: TaskNode, cand: ScoredTable
+    ) -> TimeCoverage | None:
+        """COVERAGE probe for the candidate's best time column (N2).
+
+        Runs at most one bounded MIN/MAX query per (table, column) per run
+        (registry-cached) and only when the requirement carries a time_range —
+        the decisive capability evidence separating e.g. an archive table that
+        ends in 2021 from a fact table covering 2024.
+        """
+        req = node.requirements
+        if not req or not req.time_range:
+            return None
+        date_cols = [
+            c for c in cand.schema.columns
+            if any(tok in c.name.lower() for tok in ("date", "time", "_at", "_ts"))
+        ]
+        if not date_cols:
+            return None
+        typed_first = sorted(
+            date_cols,
+            key=lambda c: c.type.upper()
+            not in ("DATE", "DATETIME", "TIMESTAMP", "TIMESTAMP_NTZ"),
+        )
+        return self.probe.time_coverage(
+            cand.schema.name, [c.name for c in typed_first]
         )
 
     def _build_candidate_order(self, node: TaskNode) -> list[ScoredTable]:
@@ -758,9 +788,23 @@ class RLMAgent:
                 break
 
             quality = self._check_result_quality(data)
-            if quality and "0 rows" in quality:
-                logger.warning("  [%s#a%d] EMPTY RESULT (attempt %d/%d)", node.id, attempt, attempt + 1, max_attempts)
-                signals.had_empty_result = True
+            is_empty = bool(quality and "0 rows" in quality)
+            # An aggregate over an empty join set returns a 1-row all-NULL
+            # frame — NOT an empty DataFrame. Treating it as usable data let a
+            # NULL-total masquerade as a viable answer (S-run: archive_orders_2021
+            # join produced SUM=NULL and won selection). Same contract as empty:
+            # record the signal, retry with feedback, allow verified skip.
+            is_null = bool(quality and "all NULL" in quality)
+            if is_empty or is_null:
+                if is_null:
+                    logger.warning(
+                        "  [%s#a%d] ALL-NULL RESULT (attempt %d/%d)",
+                        node.id, attempt, attempt + 1, max_attempts,
+                    )
+                    signals.had_null_columns = True
+                else:
+                    logger.warning("  [%s#a%d] EMPTY RESULT (attempt %d/%d)", node.id, attempt, attempt + 1, max_attempts)
+                    signals.had_empty_result = True
                 if attempt < max_attempts - 1:
                     probe_msg, skip_candidate = self._probe_empty_feedback(sql)
                     if skip_candidate:
@@ -771,12 +815,18 @@ class RLMAgent:
                             node.id, attempt,
                         )
                         break
-                    attempt_feedback.append(
-                        probe_msg
-                        or "SQL executed successfully but returned 0 rows. The filter "
+                    default_msg = (
+                        "SQL executed successfully but returned 0 rows. The filter "
                         "columns, filter values, or join keys may be wrong — "
                         "reconsider which columns hold the required data and retry."
+                        if is_empty
+                        else "SQL executed but every result column is NULL — the "
+                        "aggregation matched no rows (e.g. the JOIN filtered "
+                        "everything out or the table's data does not cover the "
+                        "requested range). Re-anchor on a source whose data "
+                        "actually covers the requirement."
                     )
+                    attempt_feedback.append(probe_msg or default_msg)
                     continue
                 path.path_score = evaluator.evaluate(vresult, signals, retriever_score)
                 break

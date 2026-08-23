@@ -108,14 +108,26 @@ class Aggregator:
         primary = self._pick_primary(leaf_results)
 
         if (primary is None
+                or primary.status != NodeStatus.SOLVED
                 or primary.data is None
                 or primary.data.empty):
             fallback = self._pick_solved_any(list(results.values()))
             if fallback is not None:
                 primary = fallback
 
-        if primary is not None and primary.data is not None and not primary.data.empty:
+        # An AMBIGUOUS/FAILED leaf's provisional data must never become the
+        # answer basis (S-run: a fully-tied node leaked its alphabetical
+        # winner's NULL-total SQL upward as if it were the answer). Only a
+        # SOLVED selection may carry data; ambiguity keeps lowering
+        # confidence (below) instead of masquerading as a solved number.
+        if (
+            primary is not None
+            and primary.status == NodeStatus.SOLVED
+            and primary.data is not None
+            and not primary.data.empty
+        ):
             all_data = primary.data
+        if primary is not None:
             best_conf = primary.confidence
             if primary.selected_candidate is not None:
                 best_conf = max(best_conf, primary.selected_candidate.confidence)
@@ -389,9 +401,10 @@ class Aggregator:
         """Trust node-level Local Selection; never re-rank candidates.
 
         SOLVED leaves (with a `selected_candidate`) outrank AMBIGUOUS leaves;
-        among SOLVED leaves the selected candidate's evidence is used. An
-        AMBIGUOUS leaf keeps its provisional data only if no SOLVED leaf
-        exists — it is not fabricated as a winner.
+        among SOLVED leaves the selected candidate's evidence is used. Only a
+        SOLVED leaf is answer-capable: an AMBIGUOUS leaf's provisional data is
+        never promoted to the primary just because it happens to be non-empty
+        (that would launder an arbitrary tie-break into a winner).
         """
 
         def key(res: NodeResult):
@@ -410,7 +423,11 @@ class Aggregator:
 
         ranked = sorted(leaf_results, key=key, reverse=True)
         for res in ranked:
-            if res.data is not None and not res.data.empty:
+            if (
+                res.status == NodeStatus.SOLVED
+                and res.data is not None
+                and not res.data.empty
+            ):
                 return res
         return ranked[0] if ranked else None
 
